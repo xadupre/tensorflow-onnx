@@ -129,6 +129,13 @@ class Node(object):
             attr = 0
         return attr
 
+    def get_attr_str(self, name):
+        """Get attribute map."""
+        attr = self.attr.get(name)
+        if attr is not None:
+            attr = attr.s.decode("utf-8")
+        return attr
+
     def set_attr(self, name, value):
         self.attr[name] = helper.make_attribute(name, value)
 
@@ -789,3 +796,43 @@ class Graph(object):
         """
         related_nodes = self.extract_sub_graph_nodes(outputs_name)
         self.set_nodes(related_nodes)
+
+
+class GraphBuilder(object):
+    def __init__(self, ctx, prefix=None):
+        self._ctx = ctx
+        self._nodes = []
+        self._prefix = prefix
+
+    @property
+    def ctx(self):
+        return self._ctx
+
+    @property
+    def nodes(self):
+        return self._nodes
+
+    @property
+    def prefix(self):
+        return self._prefix
+
+    def set_prefix(self, prefix=None):
+        self._prefix = prefix
+
+    def make_name(self, name):
+        if self.prefix:
+            name = "{}_{}".format(self.prefix, name)
+        return utils.make_name(name)
+
+    def add_node(self, op_type, inputs, output_count=1, name=None, domain=None, **kwargs):
+        name = self.make_name(name or op_type)
+        node = Node(helper.make_node(op_type, inputs, [utils.port_name(name, i) for i in range(output_count)],
+                                     name=name, **kwargs), self._ctx)
+        if domain is not None:
+            node.domain = domain
+
+        self._nodes.append(node)
+        return node
+
+    def make_const(self, name, np_val, skip_conversion=False):
+        return self.ctx.make_const(self.make_name(name), np_val, skip_conversion)

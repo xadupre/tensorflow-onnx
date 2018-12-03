@@ -1172,5 +1172,31 @@ class BackendTests(Tf2OnnxBackendTestBase):
         kwargs = {"check_dtype": True}
         self._run_test_case([_OUTPUT], {_INPUT: x_val}, **kwargs)
 
+    def test_quantize(self):
+        test_ranges = [(-3.9, 1.1), (-1.9, 2.1), (0.0, 3.1), (2.8, 5.2)]
+        test_dtypes = [tf.quint8]
+        for (min_range, max_range), dtype in product(test_ranges, test_dtypes):
+            x_shape = (3, 4, 5)
+            x_val = np.random.uniform(min_range, max_range, np.prod(x_shape)).astype(np.float32).reshape(x_shape)
+            x = tf.placeholder(tf.float32, shape=x_val.shape, name=_TFINPUT)
+            y, _, _ = tf.quantize(x, min_range, max_range, dtype, mode="SCALED", round_mode="HALF_AWAY_FROM_ZERO")
+            _ = tf.identity(y, name=_TFOUTPUT)
+            self._run_test_case([_OUTPUT], {_INPUT: x_val})
+            tf.reset_default_graph()
+
+    def test_dequantize(self):
+        test_ranges = [(-3.9, 1.1), (-1.9, 2.1), (0.0, 3.1), (2.8, 5.2)]
+        test_dtypes = [tf.quint8]
+        for (min_range, max_range), dtype in product(test_ranges, test_dtypes):
+            x_shape = (3, 4, 5)
+            x_val = np.random.uniform(min_range, max_range, np.prod(x_shape)).astype(np.float32).reshape(x_shape)
+            x = tf.placeholder(tf.float32, shape=x_val.shape, name=_TFINPUT)
+            y, qmin, qmax = tf.quantize(x, min_range, max_range, dtype, mode="SCALED", round_mode="HALF_AWAY_FROM_ZERO")
+            z = tf.dequantize(y, qmin, qmax, mode="SCALED")
+            _ = tf.identity(z, name=_TFOUTPUT)
+            self._run_test_case([_OUTPUT], {_INPUT: x_val})
+            tf.reset_default_graph()
+
+
 if __name__ == '__main__':
     Tf2OnnxBackendTestBase.trigger(BackendTests)

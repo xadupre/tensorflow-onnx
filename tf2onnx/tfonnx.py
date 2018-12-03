@@ -22,7 +22,7 @@ from tensorflow.tools.graph_transforms import TransformGraph
 import tf2onnx
 from tf2onnx import utils
 from tf2onnx.function.select import select_op8
-from tf2onnx.graph import Node, Graph
+from tf2onnx.graph import Node, Graph, GraphBuilder
 from tf2onnx.graph_matcher import OpTypePattern, GraphMatcher
 from tf2onnx.rewriter.random_uniform import rewrite_random_uniform, rewrite_random_uniform_fold_const
 from tf2onnx.rewriter.rnn import rewrite_bi_direction_gru
@@ -43,7 +43,8 @@ TARGET_RS4 = "rs4"
 TARGET_RS5 = "rs5"
 TARGET_RS6 = "rs6"
 TARGET_CAFFE2 = "caffe2"
-POSSIBLE_TARGETS = [TARGET_RS4, TARGET_RS5, TARGET_RS6, TARGET_CAFFE2]
+TARGET_INTEL = "intel"
+POSSIBLE_TARGETS = [TARGET_RS4, TARGET_RS5, TARGET_RS6, TARGET_CAFFE2, TARGET_INTEL]
 DEFAULT_TARGET = []
 
 
@@ -130,7 +131,10 @@ def tflist_to_onnx(node_list, shape_override):
             elif a in ignored_attr:
                 continue
             else:
-                attr[a] = utils.get_tf_node_attr(node, a)
+                val = utils.get_tf_node_attr(node, a)
+                if node.node_def.attr[a].HasField("type"):
+                    val = utils.map_tf_dtype(val)
+                attr[a] = val
 
         if takeit:
             try:
@@ -575,7 +579,11 @@ def add_padding(ctx, node, kernel_shape, strides, dilations=None, spatial=2):
         if padding == 'SAME':
             pads = [0] * spatial * 2
             input_shape = ctx.get_shape(node.input[0])
+            if input_shape is None:
+                log.error("failed to get input_shape: %s", node.input[0])
             output_shape = ctx.get_shape(node.output[0])
+            if output_shape is None:
+                log.error("failed to get output_shape: %s", node.output[0])
             # check if the input shape is valid
             if len(input_shape) != len(pads):
                 log.error("node %s input needs to be rank %d, is %d" % (node.name, len(pads), len(input_shape)))
@@ -1652,6 +1660,348 @@ def erf_op(ctx, node, name, args):
     return nodes
 
 
+MS_DOMAIN = "com.microsoft"
+
+
+def calculate_scale_zp_from_min_max(min_range, max_range, dtype, mode="SCALED", round_mode="HALF_AWAY_FROM_ZERO"):
+    assert dtype in [np.int8, np.uint8]
+    assert mode == "SCALED"
+    assert round_mode == "HALF_AWAY_FROM_ZERO"
+    assert max_range > min_range
+
+    iinfo = np.iinfo(dtype)
+    if np.issubdtype(dtype, np.signedinteger):
+        fixed_range = iinfo.max * 2
+        float_range = np.maximum(np.abs(min_range), np.abs(max_range)) * 2
+    else:
+        assert max_range > 0
+        fixed_range = iinfo.max
+        float_range = max_range
+
+    scale = np.array(float_range / fixed_range, dtype=np.float32)
+    zp = np.array(0, dtype=dtype)
+    return scale, zp
+
+
+def convert_const_min_max_to_scale_zp(builder, min_range, max_range, dtype, mode="SCALED",
+                                      round_mode="HALF_AWAY_FROM_ZERO"):
+    assert min_range.is_const() and max_range.is_const()
+
+    scale, zp = calculate_scale_zp_from_min_max(min_range.get_tensor(), max_range.get_tensor(),
+                                                utils.ONNX_TO_NUMPY_DTYPE[dtype], mode, round_mode)
+    scale_node = builder.make_const("scale", scale)
+    zp_node = builder.make_const("zp", zp)
+    return scale_node, zp_node
+
+
+def convert_non_const_min_max_to_scale_zp(builder, min_range, max_range, dtype, mode="SCALED",
+                                          round_mode="HALF_AWAY_FROM_ZERO"):
+    assert dtype in [onnx_pb.TensorProto.INT8, onnx_pb.TensorProto.UINT8]
+    assert mode == "SCALED"
+    assert round_mode == "HALF_AWAY_FROM_ZERO"
+
+    numpy_dtype = utils.ONNX_TO_NUMPY_DTYPE[dtype]
+    iinfo = np.iinfo(numpy_dtype)
+    if np.issubdtype(numpy_dtype, np.signedinteger):
+        fixed_range = builder.make_const("fixed_range", np.array(iinfo.max * 2, dtype=np.float32))
+        abs_min_range = builder.add_node("Abs", [min_range.output[0]])
+        abs_max_range = builder.add_node("Abs", [max_range.output[0]])
+        m = builder.add_node("Max", [abs_min_range.output[0], abs_max_range.output[0]])
+        float_range = builder.add_node("Add", [m.output[0], m.output[0]])
+    else:
+        fixed_range = builder.make_const("fixed_range", np.array(iinfo.max, dtype=np.float32))
+        # For scaled mode, TF will adjust min_range to 0
+        min_range = builder.make_const("min_range", np.array(0.0, dtype=np.float32))
+        # assume max_range > 0
+        float_range = builder.add_node("Sub", [max_range.output[0], min_range.output[0]])
+
+    scale = builder.add_node("Div", [float_range.output[0], fixed_range.output[0]], name="scale")
+    zp = builder.make_const("zp", np.array(0, dtype=numpy_dtype))
+    return scale, zp
+
+
+def convert_min_max_to_scale_zp(builder, min_range, max_range, dtype, mode="SCALED", round_mode="HALF_AWAY_FROM_ZERO"):
+    if min_range.is_const() and max_range.is_const():
+        return convert_const_min_max_to_scale_zp(builder, min_range, max_range, dtype, mode, round_mode)
+    return convert_non_const_min_max_to_scale_zp(builder, min_range, max_range, dtype, mode, round_mode)
+
+
+def quantize_op(ctx, node, name, args):
+    assert node.dtype in [onnx_pb.TensorProto.INT8, onnx_pb.TensorProto.UINT8]
+
+    if ctx.is_target(TARGET_INTEL):
+        if node.dtype != onnx_pb.TensorProto.INT8:
+            log.warning("[%s: %s] change dtype, current=%s, new=%s", node.type, node.name,
+                        utils.ONNX_DTYPE_NAMES[node.dtype], utils.ONNX_DTYPE_NAMES[onnx_pb.TensorProto.INT8])
+            node.dtype = onnx_pb.TensorProto.INT8
+
+        if node.get_attr_str("mode") != "SCALED":
+            log.warning("[%s: %s] change mode, current=%s, new=%s", node.type, node.name,
+                        node.get_attr_str("mode"), "SCALED")
+            node.set_attr("mode", "SCALED")
+
+        if node.get_attr_str("round_mode") != "HALF_AWAY_FROM_ZERO":
+            log.warning("[%s: %s] change round_mode, current=%s, new=%s", node.type, node.name,
+                        node.get_attr_str("round_mode"), "HALF_AWAY_FROM_ZERO")
+            node.set_attr("round_mode", "HALF_AWAY_FROM_ZERO")
+
+    builder = GraphBuilder(ctx, node.name)
+    builder.nodes.append(node)
+
+    scale, zp = convert_min_max_to_scale_zp(builder, node.inputs[1], node.inputs[2], node.dtype,
+                                            node.get_attr_str("mode"), node.get_attr_str("round_mode"))
+
+    node.type = "QuantizeLinear"
+    node.domain = MS_DOMAIN
+    node.input[1] = scale.output[0]  # y_scale
+    node.input[2] = zp.output[0]  # y_zero_point
+    # forward scale/zp to consumers
+    ctx.replace_all_inputs(ctx.get_nodes(), node.output[1], scale.output[0])
+    ctx.replace_all_inputs(ctx.get_nodes(), node.output[2], zp.output[0])
+    del node.output[1:]
+    del node.attr["mode"]
+
+    return builder.nodes
+
+
+def dequantize_op(ctx, node, name, args):
+    if ctx.is_target(TARGET_INTEL):
+        if node.dtype != onnx_pb.TensorProto.INT8:
+            log.warning("[%s: %s] change dtype, current=%s, new=%s", node.type, node.name,
+                        utils.ONNX_DTYPE_NAMES[node.dtype], utils.ONNX_DTYPE_NAMES[onnx_pb.TensorProto.INT8])
+            node.dtype = onnx_pb.TensorProto.INT8
+
+        if node.get_attr_str("mode") != "SCALED":
+            log.warning("[%s: %s] change mode, current=%s, new=%s", node.type, node.name,
+                        node.get_attr_str("mode"), "SCALED")
+            node.set_attr("mode", "SCALED")
+
+    node.type = "DequantizeLinear"
+    node.domain = MS_DOMAIN
+    del node.attr["mode"]
+    return node
+
+
+def convert_mkl_fused_conv_with_bias(builder, node):
+    ctx = builder.ctx
+
+    input_dtype = node.inputs[0].dtype
+    b_dtype = node.inputs[2].dtype
+
+    # convert current node to QLinearConv, treat LIKE a normal conv node
+    node.type = "QLinearConv"
+    node.domain = MS_DOMAIN
+    node.data_format = "NHWC"
+    node.dtype = input_dtype
+
+    builder.nodes.extend(conv_op(ctx, node, None, None))
+    shape = ctx.get_shape(node.output[0])
+
+    # build inputs for QLinearConv
+    builder.set_prefix(node.name + "_w")
+    w_scale, w_zp = convert_min_max_to_scale_zp(builder, node.inputs[5], node.inputs[6], node.dtype)
+
+    builder.set_prefix(node.name + "_y")
+    y_scale, y_zp = convert_min_max_to_scale_zp(builder, node.inputs[7], node.inputs[8], node.dtype)
+
+    conv_inputs = [
+        node.input[0],  # x
+        node.input[3],  # x_scale
+        node.input[4],  # x_zero_point
+        node.input[1],  # w
+        w_scale.output[0],
+        w_zp.output[0],
+        y_scale.output[0],
+        y_zp.output[0],
+    ]
+
+    bias = node.input[2]
+    if b_dtype == onnx_pb.TensorProto.INT32:
+        conv_inputs.append(bias)
+
+    # make a copy before update
+    node.input.clear()
+    node.input.extend(conv_inputs)
+    # forward scale/zp to consumers
+    ctx.replace_all_inputs(ctx.get_nodes(), node.output[1], y_scale.output[0])
+    ctx.replace_all_inputs(ctx.get_nodes(), node.output[2], y_zp.output[0])
+    del node.output[1:]
+
+    # the last node is QLinearConv or the transpose after it
+    final = builder.nodes[-1]
+
+    # add bias
+    if b_dtype == onnx_pb.TensorProto.FLOAT:
+        builder.set_prefix(node.name)
+        dq = builder.add_node("DequantizeLinear", [final.output[0], y_scale.output[0], y_zp.output[0]],
+                              domain=MS_DOMAIN)
+        add = builder.add_node("Add", [dq.output[0], bias])
+        rq = builder.add_node("QuantizeLinear", [add.output[0], y_scale.output[0], y_zp.output[0]], domain=MS_DOMAIN)
+        rq.dtype = node.dtype
+        ctx.replace_all_inputs(ctx.get_nodes(), final.output[0], rq.output[0])
+        final = rq
+
+    # forward shape
+    ctx.set_shape(final.output[0], shape)
+    return final, y_scale, y_zp
+
+
+def mkl_fused_quantization_op(ctx, node, name, args):
+    assert ctx.is_target(TARGET_INTEL)
+    assert all([node.inputs[i].is_const() for i in [1, 2, 5, 6, 7, 8]])
+
+    def check_dtype(attr_name, actual_dtype):
+        val = node.get_attr_int(attr_name)
+        if actual_dtype is None:
+            log.error("[%s: %s] %s type not found, attr=%s, actual=%s", node.type, node.name, attr_name,
+                      utils.ONNX_DTYPE_NAMES[val], None)
+        elif actual_dtype != val:
+            log.warning("[%s: %s] %s type mismatch, attr=%s, actual=%s", node.type, node.name, attr_name,
+                        utils.ONNX_DTYPE_NAMES[val], utils.ONNX_DTYPE_NAMES[actual_dtype])
+
+    input_dtype = node.inputs[0].dtype
+    w_dtype = node.inputs[1].dtype
+    b_dtype = node.inputs[2].dtype
+    output_dtype = node.get_attr_int("out_type")
+
+    check_dtype("Tinput", input_dtype)
+    check_dtype("Tfilter", w_dtype)
+    check_dtype("Tbias", b_dtype)
+
+    if input_dtype != w_dtype:
+        log.warning("[%s: %s] inconsistent types, input_dtype=%s, w_dtype=%s", node.type, node.name,
+                    utils.ONNX_DTYPE_NAMES[input_dtype], utils.ONNX_DTYPE_NAMES[w_dtype])
+
+    if input_dtype != output_dtype:
+        log.warning("[%s: %s] inconsistent types, input_dtype=%s, output_dtype=%s", node.type, node.name,
+                    utils.ONNX_DTYPE_NAMES[input_dtype], utils.ONNX_DTYPE_NAMES[output_dtype])
+
+    builder = GraphBuilder(ctx, node.name)
+    op_type = node.type
+    if op_type == "QuantizedConv2DWithBiasAndRequantize":
+        """
+        .Input("input: Tinput")
+        .Input("filter: Tfilter")
+        .Input("bias: Tbias")
+        .Input("min_input: float")
+        .Input("max_input: float")
+        .Input("min_filter: float")
+        .Input("max_filter: float")
+        .Input("min_freezed_output: float")
+        .Input("max_freezed_output: float")
+        .Output("output: out_type")
+        .Output("min_output: float")
+        .Output("max_output: float")
+        """
+        convert_mkl_fused_conv_with_bias(builder, node)
+    elif op_type == "QuantizedConv2DWithBiasAndReluAndRequantize":
+        """
+        .Input("input: Tinput")
+        .Input("filter: Tfilter")
+        .Input("bias: Tbias")
+        .Input("min_input: float")
+        .Input("max_input: float")
+        .Input("min_filter: float")
+        .Input("max_filter: float")
+        .Input("min_freezed_output: float")
+        .Input("max_freezed_output: float")
+        .Output("output: out_type")
+        .Output("min_output: float")
+        .Output("max_output: float")
+        """
+        qconv, y_scale, y_zp = convert_mkl_fused_conv_with_bias(builder, node)
+
+        # dequantize -> relu -> requantize
+        builder.set_prefix(node.name)
+        dq_qconv = builder.add_node("DequantizeLinear", [qconv.output[0], y_scale.output[0], y_zp.output[0]],
+                                    domain=MS_DOMAIN)
+        relu = builder.add_node("Relu", [dq_qconv.output[0]])
+        rq_relu = builder.add_node("QuantizeLinear", [relu.output[0], y_scale.output[0], y_zp.output[0]],
+                                   domain=MS_DOMAIN)
+        rq_relu.dtype = node.dtype
+        ctx.copy_shape(qconv.output[0], rq_relu.output[0])
+        ctx.replace_all_inputs(ctx.get_nodes(), qconv.output[0], rq_relu.output[0])
+    elif op_type == "QuantizedConv2DWithBiasSignedSumAndReluAndRequantize":
+        """
+        .Input("input: Tinput")
+        .Input("filter: Tfilter")
+        .Input("bias: Tbias")
+        .Input("min_input: float")
+        .Input("max_input: float")
+        .Input("min_filter: float")
+        .Input("max_filter: float")
+        .Input("min_freezed_output: float")
+        .Input("max_freezed_output: float")
+        .Input("summand: Tsummand")
+        .Input("min_summand: float")
+        .Input("max_summand: float")
+        .Output("output: out_type")
+        .Output("min_output: float")
+        .Output("max_output: float")        
+        """
+        input_names = node.input[:]
+        qconv, y_scale, y_zp = convert_mkl_fused_conv_with_bias(builder, node)
+
+        # sum, qconv and summand are quantized, need to dequantize first
+        # min_summand, max_summand are already converted to scale and zp
+        builder.set_prefix(node.name)
+        dq_qconv = builder.add_node("DequantizeLinear", [qconv.output[0], y_scale.output[0], y_zp.output[0]],
+                                    domain=MS_DOMAIN)
+        dq_summand = builder.add_node("DequantizeLinear", [input_names[9], input_names[10], input_names[11]],
+                                      domain=MS_DOMAIN)
+        sum = builder.add_node("Add", [dq_qconv.output[0], dq_summand.output[0]])
+
+        # relu -> requantize
+        relu = builder.add_node("Relu", [sum.output[0]])
+        rq_relu = builder.add_node("QuantizeLinear", [relu.output[0], y_scale.output[0], y_zp.output[0]],
+                                   domain=MS_DOMAIN)
+        rq_relu.dtype = node.dtype
+        ctx.copy_shape(qconv.output[0], rq_relu.output[0])
+        ctx.replace_all_inputs(ctx.get_nodes(), qconv.output[0], rq_relu.output[0])
+    elif op_type == "QuantizedConv2DWithBiasSumAndReluAndRequantize":
+        """
+        .Input("input: Tinput")
+        .Input("filter: Tfilter")
+        .Input("bias: Tbias")
+        .Input("min_input: float")
+        .Input("max_input: float")
+        .Input("min_filter: float")
+        .Input("max_filter: float")
+        .Input("min_freezed_output: float")
+        .Input("max_freezed_output: float")
+        .Input("summand: Tsummand")
+        .Input("min_summand: float")
+        .Input("max_summand: float")
+        .Output("output: out_type")
+        .Output("min_output: float")
+        .Output("max_output: float")        
+        """
+        input_names = node.input[:]
+        qconv, y_scale, y_zp = convert_mkl_fused_conv_with_bias(builder, node)
+
+        # sum, qconv and summand are quantized, need to dequantize first
+        # min_summand, max_summand are already converted to scale and zp
+        builder.set_prefix(node.name)
+        dq_qconv = builder.add_node("DequantizeLinear", [qconv.output[0], y_scale.output[0], y_zp.output[0]],
+                                    domain=MS_DOMAIN)
+        dq_summand = builder.add_node("DequantizeLinear", [input_names[9], input_names[10], input_names[11]],
+                                      domain=MS_DOMAIN)
+        sum = builder.add_node("Add", [dq_qconv.output[0], dq_summand.output[0]])
+
+        # relu -> requantize
+        relu = builder.add_node("Relu", [sum.output[0]])
+        rq_relu = builder.add_node("QuantizeLinear", [relu.output[0], y_scale.output[0], y_zp.output[0]],
+                                   domain=MS_DOMAIN)
+        rq_relu.dtype = node.dtype
+        ctx.copy_shape(qconv.output[0], rq_relu.output[0])
+        ctx.replace_all_inputs(ctx.get_nodes(), qconv.output[0], rq_relu.output[0])
+
+    else:
+        assert False
+
+    return builder.nodes
+
+
 # map tensorflow ops to onnx ops. The format below is
 # "TFOP": func_to_map, ["OnnxOp", ...]
 #
@@ -1786,6 +2136,15 @@ _OPSET_7 = {
     "Tan": (direct_op, []),
     "Tile": (tile_op7, []),
     "TruncateDiv": (broadcast_op7, ["Div"]),
+    "QuantizeV2": (quantize_op, []),
+    "Dequantize": (dequantize_op, []),
+    "QuantizedConv2DWithBiasAndReluAndRequantize": (
+        mkl_fused_quantization_op, ["QuantizedConv2DWithBiasAndReluAndRequantize"]),
+    "QuantizedConv2DWithBiasSumAndReluAndRequantize": (
+        mkl_fused_quantization_op, ["QuantizedConv2DWithBiasSumAndReluAndRequantize"]),
+    "QuantizedConv2DWithBiasSignedSumAndReluAndRequantize": (
+        mkl_fused_quantization_op, ["QuantizedConv2DWithBiasSignedSumAndReluAndRequantize"]),
+    "QuantizedConv2DWithBiasAndRequantize": (mkl_fused_quantization_op, ["QuantizedConv2DWithBiasAndRequantize"]),
 }
 
 _OPSET_8 = {
@@ -2111,6 +2470,34 @@ def rewrite_incomplete_type_support_rs6(g, ops):
     return rewrite_incomplete_type_support(g, ops, ["Slice", "Transpose"])
 
 
+def rewrite_duplicated_quantization(g, ops):
+    pattern = \
+        OpTypePattern("DequantizeLinear", name="dequantize", inputs=[
+            OpTypePattern("QuantizeLinear", name="quantize"), "*", "*"
+        ])
+
+    matcher = GraphMatcher(pattern)
+    match_results = list(matcher.match_ops(ops))
+    for match in match_results:
+        quantize = match.get_op("quantize")
+        dequantize = match.get_op("dequantize")
+
+        q_scale = quantize.inputs[1]
+        q_zp = quantize.inputs[2]
+        dq_scale = dequantize.inputs[1]
+        dq_zp = dequantize.inputs[2]
+
+        if all([n.is_const() for n in [q_scale, q_zp, dq_scale, dq_zp]]) \
+                and np.equal(q_scale.get_tensor(), dq_scale.get_tensor()) \
+                and np.equal(q_zp.get_tensor(), dq_zp.get_tensor()):
+            g.replace_all_inputs(ops, dequantize.output[0], quantize.input[0])
+            dequantize.set_deleted()
+            if len(g.find_output_consumers(quantize.output[0])) <= 1:
+                quantize.set_deleted()
+
+    return g.remove_deleted_nodes(ops)
+
+
 def tensorflow_onnx_mapping(g, continue_on_error, custom_op_handlers):
     mapped_op = collections.Counter()
     unmapped_op = collections.Counter()
@@ -2288,6 +2675,8 @@ def process_tf_graph(tf_graph, continue_on_error=False, verbose=False, target=No
         late_rewriters.append(rewrite_incomplete_type_support_rs5)
     if TARGET_RS6 in target:
         late_rewriters.append(rewrite_incomplete_type_support_rs6)
+    if TARGET_INTEL in target:
+        late_rewriters.append(rewrite_duplicated_quantization)
     if late_rewriters:
         topological_sort(g.get_nodes())
         ops = g.get_nodes()

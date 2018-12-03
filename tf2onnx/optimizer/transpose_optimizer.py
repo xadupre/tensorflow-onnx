@@ -144,6 +144,8 @@ class TransposeOptimizer(object):
         log.debug("finish after " + str(iteration_cnt) + " iteration(s)")
         self.post_optimize_action()
 
+        self._g.topological_sort(self._g.get_nodes())
+
         current_counter = self._g.dump_node_statistics()
         transpose_cnt = current_counter["Transpose"]
         current_counter.subtract(previous_counter)
@@ -155,11 +157,13 @@ class TransposeOptimizer(object):
         self._handler_map = {
             "Add": self._add_handler,
             "Concat": self._concat_handler,
+            "DequantizeLinear": self._dequantize_linear_handler,
             "Identity": self._identity_handler,
             "Max": self._maxmin_handler,
             "Min": self._maxmin_handler,
             "Mul": self._mul_handler,
             "Pad": self._pad_handler,
+            "QuantizeLinear": self._quantize_linear_handler,
             "ReduceMean": self._reducemean_handler,
             "Relu": self._relu_handler,
             "Slice": self._slice_handler,
@@ -234,6 +238,18 @@ class TransposeOptimizer(object):
         self._g.replace_all_inputs(ops, node.output[0], trans.output[0])
         node.input[input_index] = trans.input[0]
         trans.input[0] = utils.port_name(node.name)
+
+        # need to transpose node shape in backward direction as well after switch
+        # otherwise, reshape added in post_optimize_action may not work correctly
+        shape = self._g.get_shape(node.output[0])
+        if shape:
+            if is_nhwc_transpose(trans):
+                mapping = [0, 3, 1, 2]
+            else:
+                mapping = [0, 2, 3, 1]
+            new_shape = [shape[i] for i in mapping]
+            self._g.set_shape(node.output[0], new_shape)
+
         self._g.set_nodes(ops)
         return True
 
@@ -476,4 +492,10 @@ class TransposeOptimizer(object):
 
     # todo: consider share a same logic for element-wise op.
     def _tanh_handler(self, trans, node):
+        return self._switch_transpose_and_node(node, trans)
+
+    def _quantize_linear_handler(self, trans, node):
+        return self._switch_transpose_and_node(node, trans)
+
+    def _dequantize_linear_handler(self, trans, node):
         return self._switch_transpose_and_node(node, trans)

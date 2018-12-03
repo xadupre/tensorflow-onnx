@@ -81,6 +81,8 @@ def main():
         custom_ops = {}
         extra_opset = None
 
+    extra_opset = [helper.make_opsetid("com.microsoft", 1)]
+
     graph_def = tf.GraphDef()
     with tf.gfile.GFile(args.input, 'rb') as f:
         graph_def.ParseFromString(f.read())
@@ -103,6 +105,7 @@ def main():
     optimizer = TransposeOptimizer(g, args.outputs, args.verbose is not None)
     optimizer.optimize()
 
+    g.topological_sort(g.get_nodes())
     model_proto = g.make_model(
         "converted from {}".format(args.input),
         optimize=not args.continue_on_error)
