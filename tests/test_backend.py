@@ -1172,6 +1172,7 @@ class BackendTests(Tf2OnnxBackendTestBase):
         kwargs = {"check_dtype": True}
         self._run_test_case([_OUTPUT], {_INPUT: x_val}, **kwargs)
 
+    @unittest.skip("requires tf master build")
     def test_quantize(self):
         test_ranges = [(-3.9, 1.1), (-1.9, 2.1), (0.0, 3.1), (2.8, 5.2)]
         test_dtypes = [tf.quint8]
@@ -1184,6 +1185,7 @@ class BackendTests(Tf2OnnxBackendTestBase):
             self._run_test_case([_OUTPUT], {_INPUT: x_val})
             tf.reset_default_graph()
 
+    @unittest.skip("requires tf master build")
     def test_dequantize(self):
         test_ranges = [(-3.9, 1.1), (-1.9, 2.1), (0.0, 3.1), (2.8, 5.2)]
         test_dtypes = [tf.quint8]

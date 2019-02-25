@@ -799,6 +799,7 @@ class Graph(object):
 
 
 class GraphBuilder(object):
+    """ utility to build graph """
     def __init__(self, ctx, prefix=None):
         self._ctx = ctx
         self._nodes = []

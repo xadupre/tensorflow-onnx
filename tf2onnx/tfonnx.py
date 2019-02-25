@@ -1879,36 +1879,32 @@ def mkl_fused_quantization_op(ctx, node, name, args):
     builder = GraphBuilder(ctx, node.name)
     op_type = node.type
     if op_type == "QuantizedConv2DWithBiasAndRequantize":
-        """
-        .Input("input: Tinput")
-        .Input("filter: Tfilter")
-        .Input("bias: Tbias")
-        .Input("min_input: float")
-        .Input("max_input: float")
-        .Input("min_filter: float")
-        .Input("max_filter: float")
-        .Input("min_freezed_output: float")
-        .Input("max_freezed_output: float")
-        .Output("output: out_type")
-        .Output("min_output: float")
-        .Output("max_output: float")
-        """
+        # .Input("input: Tinput")
+        # .Input("filter: Tfilter")
+        # .Input("bias: Tbias")
+        # .Input("min_input: float")
+        # .Input("max_input: float")
+        # .Input("min_filter: float")
+        # .Input("max_filter: float")
+        # .Input("min_freezed_output: float")
+        # .Input("max_freezed_output: float")
+        # .Output("output: out_type")
+        # .Output("min_output: float")
+        # .Output("max_output: float")
         convert_mkl_fused_conv_with_bias(builder, node)
     elif op_type == "QuantizedConv2DWithBiasAndReluAndRequantize":
-        """
-        .Input("input: Tinput")
-        .Input("filter: Tfilter")
-        .Input("bias: Tbias")
-        .Input("min_input: float")
-        .Input("max_input: float")
-        .Input("min_filter: float")
-        .Input("max_filter: float")
-        .Input("min_freezed_output: float")
-        .Input("max_freezed_output: float")
-        .Output("output: out_type")
-        .Output("min_output: float")
-        .Output("max_output: float")
-        """
+        # .Input("input: Tinput")
+        # .Input("filter: Tfilter")
+        # .Input("bias: Tbias")
+        # .Input("min_input: float")
+        # .Input("max_input: float")
+        # .Input("min_filter: float")
+        # .Input("max_filter: float")
+        # .Input("min_freezed_output: float")
+        # .Input("max_freezed_output: float")
+        # .Output("output: out_type")
+        # .Output("min_output: float")
+        # .Output("max_output: float")
         qconv, y_scale, y_zp = convert_mkl_fused_conv_with_bias(builder, node)
 
         # dequantize -> relu -> requantize
@@ -1922,23 +1918,21 @@ def mkl_fused_quantization_op(ctx, node, name, args):
         ctx.copy_shape(qconv.output[0], rq_relu.output[0])
         ctx.replace_all_inputs(ctx.get_nodes(), qconv.output[0], rq_relu.output[0])
     elif op_type == "QuantizedConv2DWithBiasSignedSumAndReluAndRequantize":
-        """
-        .Input("input: Tinput")
-        .Input("filter: Tfilter")
-        .Input("bias: Tbias")
-        .Input("min_input: float")
-        .Input("max_input: float")
-        .Input("min_filter: float")
-        .Input("max_filter: float")
-        .Input("min_freezed_output: float")
-        .Input("max_freezed_output: float")
-        .Input("summand: Tsummand")
-        .Input("min_summand: float")
-        .Input("max_summand: float")
-        .Output("output: out_type")
-        .Output("min_output: float")
-        .Output("max_output: float")        
-        """
+        # .Input("input: Tinput")
+        # .Input("filter: Tfilter")
+        # .Input("bias: Tbias")
+        # .Input("min_input: float")
+        # .Input("max_input: float")
+        # .Input("min_filter: float")
+        # .Input("max_filter: float")
+        # .Input("min_freezed_output: float")
+        # .Input("max_freezed_output: float")
+        # .Input("summand: Tsummand")
+        # .Input("min_summand: float")
+        # .Input("max_summand: float")
+        # .Output("output: out_type")
+        # .Output("min_output: float")
+        # .Output("max_output: float")
         input_names = node.input[:]
         qconv, y_scale, y_zp = convert_mkl_fused_conv_with_bias(builder, node)
 
@@ -1949,33 +1943,31 @@ def mkl_fused_quantization_op(ctx, node, name, args):
                                     domain=MS_DOMAIN)
         dq_summand = builder.add_node("DequantizeLinear", [input_names[9], input_names[10], input_names[11]],
                                       domain=MS_DOMAIN)
-        sum = builder.add_node("Add", [dq_qconv.output[0], dq_summand.output[0]])
+        dq_sum = builder.add_node("Add", [dq_qconv.output[0], dq_summand.output[0]])
 
         # relu -> requantize
-        relu = builder.add_node("Relu", [sum.output[0]])
+        relu = builder.add_node("Relu", [dq_sum.output[0]])
         rq_relu = builder.add_node("QuantizeLinear", [relu.output[0], y_scale.output[0], y_zp.output[0]],
                                    domain=MS_DOMAIN)
         rq_relu.dtype = node.dtype
         ctx.copy_shape(qconv.output[0], rq_relu.output[0])
         ctx.replace_all_inputs(ctx.get_nodes(), qconv.output[0], rq_relu.output[0])
     elif op_type == "QuantizedConv2DWithBiasSumAndReluAndRequantize":
-        """
-        .Input("input: Tinput")
-        .Input("filter: Tfilter")
-        .Input("bias: Tbias")
-        .Input("min_input: float")
-        .Input("max_input: float")
-        .Input("min_filter: float")
-        .Input("max_filter: float")
-        .Input("min_freezed_output: float")
-        .Input("max_freezed_output: float")
-        .Input("summand: Tsummand")
-        .Input("min_summand: float")
-        .Input("max_summand: float")
-        .Output("output: out_type")
-        .Output("min_output: float")
-        .Output("max_output: float")        
-        """
+        # .Input("input: Tinput")
+        # .Input("filter: Tfilter")
+        # .Input("bias: Tbias")
+        # .Input("min_input: float")
+        # .Input("max_input: float")
+        # .Input("min_filter: float")
+        # .Input("max_filter: float")
+        # .Input("min_freezed_output: float")
+        # .Input("max_freezed_output: float")
+        # .Input("summand: Tsummand")
+        # .Input("min_summand: float")
+        # .Input("max_summand: float")
+        # .Output("output: out_type")
+        # .Output("min_output: float")
+        # .Output("max_output: float")
         input_names = node.input[:]
         qconv, y_scale, y_zp = convert_mkl_fused_conv_with_bias(builder, node)
 
@@ -1986,10 +1978,10 @@ def mkl_fused_quantization_op(ctx, node, name, args):
                                     domain=MS_DOMAIN)
         dq_summand = builder.add_node("DequantizeLinear", [input_names[9], input_names[10], input_names[11]],
                                       domain=MS_DOMAIN)
-        sum = builder.add_node("Add", [dq_qconv.output[0], dq_summand.output[0]])
+        dq_sum = builder.add_node("Add", [dq_qconv.output[0], dq_summand.output[0]])
 
         # relu -> requantize
-        relu = builder.add_node("Relu", [sum.output[0]])
+        relu = builder.add_node("Relu", [dq_sum.output[0]])
         rq_relu = builder.add_node("QuantizeLinear", [relu.output[0], y_scale.output[0], y_zp.output[0]],
                                    domain=MS_DOMAIN)
         rq_relu.dtype = node.dtype
