@@ -7,7 +7,10 @@ from __future__ import division
 from __future__ import print_function
 from __future__ import unicode_literals
 
+import unittest
+from distutils.version import StrictVersion
 import numpy as np
+import onnx
 from onnx import TensorProto
 from tf2onnx import utils
 from tf2onnx.graph import Graph
@@ -162,6 +165,8 @@ class ONNXShapeInferenceTests(Tf2OnnxBackendTestBase):
         self._run_test_case(graph, self._generate_random_inputs(inputs, shapes, dtypes))
 
     # more than two inputs
+    @unittest.skipIf(StrictVersion('1.8.0') >= StrictVersion(onnx.__version__),
+                      reason="bug")
     @check_opset_min_version(8, "Sum")
     def test_sum(self):
         inputs = [INPUT1, INPUT2, INPUT3]
@@ -169,6 +174,7 @@ class ONNXShapeInferenceTests(Tf2OnnxBackendTestBase):
         dtypes = [TensorProto.FLOAT, TensorProto.FLOAT, TensorProto.FLOAT]
         graph = self._create_empty_graph(inputs, shapes, dtypes)
         node = graph.make_node("Sum", [INPUT1, INPUT2, INPUT3])
+        print(graph)
         graph.add_graph_output(node.output[0])
         self._run_test_case(graph, self._generate_random_inputs(inputs, shapes, dtypes))
 
