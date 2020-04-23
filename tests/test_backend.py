@@ -1160,6 +1160,13 @@ class BackendTests(Tf2OnnxBackendTestBase):
             return tf.split(x, [4, 15, 11], 1, name="split_test")
         self._run_test_case(func, ["split_test:0", "split_test:1", "split_test:2"], {_INPUT: x_val})
 
+    def test_negative_split(self):
+        x_val = np.linspace(1.0, 5 * 30.0, 5 * 30).astype(np.float32).reshape((5, 30))
+        def func(x):
+            x_, _, _ = tf.split(x, [4, 15, -1], 1)
+            return tf.identity(x_, name=_TFOUTPUT)
+        self._run_test_case(func, [_OUTPUT], {_INPUT: x_val})
+
     def test_reducesum(self):
         # not supported by onnx-caffe2
         x_val = np.array([1.0, 2.0, 3.0, 4.0], dtype=np.float32).reshape((2, 2))
@@ -3107,6 +3114,21 @@ class BackendTests(Tf2OnnxBackendTestBase):
             s_ = tf.add(x_, y_)
             return tf.cast(s_, tf.float32, name=_TFOUTPUT)
         self._run_test_case(func, [_OUTPUT], {_INPUT: x_val, _INPUT1: y_val})
+
+    @check_opset_min_version(11)
+    @check_tf_min_version("2.2")
+    def test_matrix_diag_part_v3(self):
+
+        def func(X, K):
+            v2 = tf.raw_ops.MatrixDiagPartV2(input=X, k=K, padding_value=0.123, name=_TFOUTPUT)
+            v3 = tf.raw_ops.MatrixDiagPartV3(input=X, k=K, padding_value=0.123, align='RIGHT_LEFT', name=_TFOUTPUT1)
+            return v2, v3
+
+        for x_shape in ([4, 5], [2, 3, 4, 5]):
+            x_val = np.random.random(x_shape).astype(np.float32)
+            for raw_k in ([0], [1], [3], [-1], [-3], [1, 2], [-2, -1], [-1, 1]):
+                k_val = np.array(raw_k).astype(np.int32)
+                self._run_test_case(func, [_OUTPUT, _OUTPUT1], {_INPUT: x_val, _INPUT1: k_val})
 
 
 if __name__ == '__main__':
