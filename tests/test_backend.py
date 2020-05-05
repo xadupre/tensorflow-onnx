@@ -2859,6 +2859,31 @@ class BackendTests(Tf2OnnxBackendTestBase):
         self._run_test_case(func, [_OUTPUT], {_INPUT: x_val1, _INPUT1: x_val2, _INPUT2: x_val3},
                             graph_validator=lambda g: check_op_count(g, "Gemm", 1))
 
+    # test for gemm pattern0: alpha*A*B + beta*C
+    @check_opset_min_version(12, "Optimizer bug in ORT 1.2")
+    def test_gemm_pattern0_fail_broadcast(self):
+        # shapes (3, 3) * (3, 1) + (1, 4) => (3, 1) + (1, 4)
+        # c not uni-broadcastable to a * b, so should not use GEMM
+        m, n, k = 3, 3, 1
+        x_val1 = np.random.rand(m, n).astype("float32")
+        x_val2 = np.random.rand(n, k).astype("float32")
+        x_val3 = np.random.rand(k, 4).astype("float32")
+
+        def func(a, b, c):
+            alpha = tf.constant(1.0, dtype=tf.float32)
+            beta = tf.constant(2.0, dtype=tf.float32)
+            mul1 = tf.multiply(alpha, tf.matmul(a, b))
+            mul2 = tf.multiply(beta, c)
+            x_ = mul1 + mul2
+            return tf.identity(x_, name=_TFOUTPUT)
+
+        def graph_validator(g):
+            if 'Gemm' in [n.type for n in g.get_nodes()]: return False
+            return True
+
+        self._run_test_case(func, [_OUTPUT], {_INPUT: x_val1, _INPUT1: x_val2, _INPUT2: x_val3},
+                            graph_validator=graph_validator)
+
     def test_graph_matcher(self):
         shape = [2, 6]
         x_val = np.random.random(shape).astype(np.float32)
@@ -3129,6 +3154,40 @@ class BackendTests(Tf2OnnxBackendTestBase):
             for raw_k in ([0], [1], [3], [-1], [-3], [1, 2], [-2, -1], [-1, 1]):
                 k_val = np.array(raw_k).astype(np.int32)
                 self._run_test_case(func, [_OUTPUT, _OUTPUT1], {_INPUT: x_val, _INPUT1: k_val})
+
+    @check_opset_min_version(12)
+    def test_inverse(self):
+        x_val = np.random.random([5, 5]).astype(np.float32)
+        def func(x):
+            return tf.linalg.inv(x, name=_TFOUTPUT)
+        self._run_test_case(func, [_OUTPUT], {_INPUT: x_val})
+
+    @check_opset_min_version(12)
+    def test_squared_distance(self):
+        x_val = np.random.random([4, 5]).astype(np.float32)
+        y_val = np.random.random([4, 5]).astype(np.float32)
+        def func(x, y):
+            return tf.math.squared_difference(x, y, name=_TFOUTPUT)
+        self._run_test_case(func, [_OUTPUT], {_INPUT: x_val, _INPUT1: y_val})
+
+    @check_opset_min_version(12)
+    @check_tf_min_version("2.1")
+    def test_einsum(self):
+        x_val = np.random.random([10]).astype(np.float32)
+        y_val = np.random.random([10]).astype(np.float32)
+        def func(x, y):
+            ret = tf.einsum("i,j->ij", x, y)
+            return tf.identity(ret, name=_TFOUTPUT)
+        self._run_test_case(func, [_OUTPUT], {_INPUT: x_val, _INPUT1: y_val})
+
+    @check_opset_min_version(7)
+    def test_compare(self):
+        x_val = np.random.random([10, 20]).astype(np.float32)
+        y_val = np.random.random([10, 20]).astype(np.float32)
+        def func(x, y):
+            return tf.math.less_equal(x, y, name=_TFOUTPUT), \
+                   tf.math.greater_equal(x, y, name=_TFOUTPUT1)
+        self._run_test_case(func, [_OUTPUT, _OUTPUT1], {_INPUT: x_val, _INPUT1: y_val})
 
 
 if __name__ == '__main__':

@@ -137,6 +137,9 @@ class MinMaxOp:
         ctx.remove_node(node.name)
         make_min_or_max_op(ctx, node.type, node.input, node.output, shapes, dtypes)
 
+    @classmethod
+    def version_12(cls, ctx, node, **kwargs):
+        pass # support all numeric types and broadcasting
 
 @tf_op("ClipByValue")
 class ClipByValueOp:
@@ -178,6 +181,9 @@ class ClipByValueOp:
             ctx.set_dtype(new_node.output[0], dtypes[0])
             ctx.set_shape(new_node.output[0], shapes[0])
 
+    @classmethod
+    def version_12(cls, ctx, node, **kwargs):
+        node.name = 'Clip' # clip supports all types now
 
 @tf_op("Softmax")
 class Softmax:
@@ -544,3 +550,26 @@ class BitShift:
             cast_back_node.set_attr("to", dtypes[0])
             ctx.set_dtype(cast_back_node.output[0], dtypes[0])
             ctx.copy_shape(node.name, cast_back_node.output[0])
+
+
+@tf_op("SquaredDistance", onnx_op="MeanSquaredDistance")
+class SquaredDistance:
+    @classmethod
+    def version_12(cls, ctx, node, **kwargs):
+        node.attr["reduction"] = "none"
+
+
+@tf_op("Einsum")
+class Einsum:
+    @classmethod
+    def version_12(cls, ctx, node, **kwargs):
+        del node.attr["N"]
+
+
+@tf_op("MatrixInverse", onnx_op="Inverse")
+class Inverse:
+    @classmethod
+    def version_12(cls, ctx, node, **kwargs):
+        utils.make_sure(node.get_attr('adjoint').i == 0, "adjoint must be false")
+        del node.attr["adjoint"]
+        node.domain = constants.MICROSOFT_DOMAIN
