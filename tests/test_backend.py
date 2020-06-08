@@ -184,15 +184,20 @@ class BackendTests(Tf2OnnxBackendTestBase):
     def test_expand_dims_one_unknown_rank(self):
         x_val = make_xval([3, 4])
         def func(x):
-            # FIXME: this was tf_placeholder(tf.float32, shape=[None, 4], name=_TFINPUT)
             op = tf.expand_dims(x, 0)
+            return tf.identity(op, name=_TFOUTPUT)
+        self._run_test_case(func, [_OUTPUT], {_INPUT: x_val})
+
+    def test_expand_dims_with_list(self):
+        x_val = make_xval([3, 4])
+        def func(x):
+            op = tf.expand_dims(x, [0])
             return tf.identity(op, name=_TFOUTPUT)
         self._run_test_case(func, [_OUTPUT], {_INPUT: x_val})
 
     def _test_expand_dims_more_unknown_rank(self, idx):
         x_val = make_xval([3, 4])
         def func(x):
-            # FIXME: this was tf_placeholder(tf.float32, shape=[None, None], name=_TFINPUT)
             op = tf.expand_dims(x, idx)
             return tf.identity(op, name=_TFOUTPUT)
         self._run_test_case(func, [_OUTPUT], {_INPUT: x_val})
@@ -1385,11 +1390,13 @@ class BackendTests(Tf2OnnxBackendTestBase):
 
     @unittest.skipIf(True, reason="output is not in graph")
     @skip_caffe2_backend()
+    @check_opset_after_tf_version("2.2", 9, "RandomUniform")
     def test_randomuniform_dyn_shape(self):
         # test for dynamic shape coming from a shape op
         x_val = np.array([0, 1, 2, 3, 5], dtype=np.int64)
         def func(x):
-            return random_uniform(x[3:], name=_TFOUTPUT, dtype=tf.float32)
+            ret = random_uniform(x[3:], dtype=tf.float32)
+            return tf.identity(ret, name=_TFOUTPUT)
         # since results are random, compare the shapes only
         self._run_test_case(func, [_OUTPUT], {_INPUT: x_val}, check_value=False, check_shape=True)
 
@@ -3339,7 +3346,7 @@ class BackendTests(Tf2OnnxBackendTestBase):
                                [7, 7, 7, 7]]]).astype(np.int64)
         diag_val = np.array([[1, 2, 3],
                              [4, 5, 6]]).astype(np.int64)
-        k_val = np.array([0])
+        k_val = np.array([0]).astype(np.int32)
 
         def func(base_matrix, diag, k):
             return tf.raw_ops.MatrixSetDiagV3(input=base_matrix, diagonal=diag, k=k, align='RIGHT_LEFT', name=_TFOUTPUT)
