@@ -60,7 +60,7 @@ class Node(object):
 
     @property
     def output(self):
-        return copy.deepcopy(self._output)
+        return self._output
 
     @output.setter
     def output(self, val):
@@ -71,11 +71,12 @@ class Node(object):
         for o in self._output:
             del self.graph._output_to_node_name[o]
 
-        self._output = val
+        self._output = val.copy()
         for o in self._output:
             utils.make_sure(o not in self.graph._output_to_node_name, "output %s already in output mapping", o)
             self.graph._output_to_node_name[o] = self.name
 
+    # TODO(tomwildenhain): Rename to "input_nodes"
     @property
     def inputs(self):
         """Input node objects."""
@@ -145,11 +146,23 @@ class Node(object):
 
     def is_nhwc(self):
         """Return True if node is in NHWC format."""
+        utils.make_sure('D' not in self.data_format, "is_nhwc called on %s with spatial=2 but data_format=%s",
+                        self.name, self.data_format)
         return self.data_format == "NHWC"
 
     def is_const(self):
         """Return True if node is a constant."""
         return self.type in ["Const", "ConstV2"]
+
+    def is_scalar(self):
+        """Return True if node is a constant with a scalar value."""
+        if not self.is_const():
+            return False
+        t = self.get_attr("value", default=None)
+        if t is None:
+            return False
+        t = numpy_helper.to_array(helper.get_attribute_value(t))
+        return t.shape == tuple()
 
     def is_graph_input(self):
         return self.type in ["Placeholder", "PlaceholderWithDefault", "PlaceholderV2"]
@@ -1318,6 +1331,7 @@ class Graph(object):
                 safe_to_remove.append(n)
         return safe_to_remove
 
+    # TODO(tomwildenhain): Remove this function
     def safe_remove_nodes(self, to_delete):
         """Delete nodes in `to_delete` without third-party node consuming it."""
         delete_set = set(to_delete)
@@ -1327,6 +1341,20 @@ class Graph(object):
                 out_consumers |= set(self.find_output_consumers(out))
             if out_consumers.issubset(delete_set):
                 self.remove_node(n.name)
+
+    def is_safe_to_remove_nodes(self, to_delete, outputs_to_ignore=None):
+        """Returns true if the outputs of all the nodes in to_delete have no third-party nodes consuming them"""
+        delete_set = set(to_delete)
+        outputs_to_ignore_set = set(outputs_to_ignore or [])
+        for n in delete_set:
+            out_consumers = set()
+            for out in n.output:
+                if out in outputs_to_ignore_set:
+                    continue
+                out_consumers |= set(self.find_output_consumers(out))
+            if not out_consumers.issubset(delete_set):
+                return False
+        return True
 
 
 class GraphUtil(object):

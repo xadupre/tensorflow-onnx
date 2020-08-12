@@ -14,6 +14,7 @@ from distutils.version import LooseVersion
 from itertools import product
 
 import numpy as np
+from numpy.testing import assert_almost_equal
 import tensorflow as tf
 
 from tensorflow.python.ops import lookup_ops
@@ -53,6 +54,7 @@ _OUTPUT2 = "output2:0"
 
 if is_tf2():
     conv2d_backprop_input = tf.compat.v1.nn.conv2d_backprop_input
+    conv3d_transpose = tf.compat.v1.nn.conv3d_transpose
     multinomial = tf.compat.v1.random.multinomial
     space_to_batch_nd = tf.compat.v1.space_to_batch_nd
     batch_to_space_nd = tf.compat.v1.batch_to_space_nd
@@ -69,8 +71,10 @@ if is_tf2():
     is_inf = tf.math.is_inf
     floormod = tf.math.floormod
     matrix_diag_part = tf.compat.v1.matrix_diag_part
+    fake_quant_with_min_max_args = tf.quantization.fake_quant_with_min_max_args
 elif LooseVersion(tf.__version__) >= "1.13":
     conv2d_backprop_input = tf.compat.v1.nn.conv2d_backprop_input
+    conv3d_transpose = tf.compat.v1.nn.conv3d_transpose
     multinomial = tf.compat.v1.random.multinomial
     space_to_batch_nd = tf.compat.v1.space_to_batch_nd
     batch_to_space_nd = tf.compat.v1.batch_to_space_nd
@@ -88,8 +92,10 @@ elif LooseVersion(tf.__version__) >= "1.13":
     is_inf = tf.math.is_inf
     floormod = tf.floormod
     matrix_diag_part = tf.compat.v1.matrix_diag_part
+    fake_quant_with_min_max_args = tf.compat.v1.quantization.fake_quant_with_min_max_args
 else:
     conv2d_backprop_input = tf.nn.conv2d_backprop_input
+    conv3d_transpose = tf.nn.conv3d_transpose
     multinomial = tf.multinomial
     space_to_batch_nd = tf.space_to_batch_nd
     batch_to_space_nd = tf.batch_to_space_nd
@@ -391,6 +397,95 @@ class BackendTests(Tf2OnnxBackendTestBase):
         x_val = np.arange(1, 1 + np.prod(x_shape)).astype("float32").reshape(x_shape)
         kernel_val = np.arange(1, 1 + np.prod(kernel_shape)).astype("float32").reshape(kernel_shape)
         self._conv_test(x_val, kernel_val, strides=strides, padding="VALID", rtol=1e-05)
+
+    def test_conv2d_dilation_same(self):
+        x_shape = [1, 35, 35, 288]  # NHWC
+        kernel_shape = [3, 3, 288, 384]  # [filter_height, filter_width, in_channels, out_channels]
+        strides = [1, 1, 1, 1]  # NHWC
+        dilations = [1, 3, 1, 1]  # NHWC
+        x_val = np.arange(1, 1 + np.prod(x_shape)).astype("float32").reshape(x_shape)
+        kernel_val = np.arange(1, 1 + np.prod(kernel_shape)).astype("float32").reshape(kernel_shape)
+        self._conv_test(x_val, kernel_val, strides=strides, padding="SAME", dilations=dilations, rtol=1e-05)
+
+    def test_conv2d_dilation_strides_same(self):
+        x_shape = [1, 35, 35, 288]  # NHWC
+        kernel_shape = [3, 3, 288, 384]  # [filter_height, filter_width, in_channels, out_channels]
+        strides = [1, 2, 4, 1]  # NHWC
+        dilations = [1, 3, 1, 1]  # NHWC
+        x_val = np.arange(1, 1 + np.prod(x_shape)).astype("float32").reshape(x_shape)
+        kernel_val = np.arange(1, 1 + np.prod(kernel_shape)).astype("float32").reshape(kernel_shape)
+        self._conv_test(x_val, kernel_val, strides=strides, padding="SAME", dilations=dilations, rtol=1e-05)
+
+    def test_conv3d_1(self):
+        strides = [1, 1, 1, 1, 1]
+        dilations = [1, 1, 1, 1, 1]
+        x_val = np.random.random_sample([2, 10, 9, 8, 5]).astype(np.float32)
+        w = np.random.random_sample([2, 3, 4, 5, 6]).astype(np.float32)
+        padding = "VALID"
+        def func(x):
+            kernel = tf.constant(w, dtype=tf.float32, name='k')
+            conv = tf.nn.conv3d(x, kernel, strides=strides, padding=padding, data_format="NDHWC", dilations=dilations)
+            return tf.identity(conv, name=_TFOUTPUT)
+        self._run_test_case(func, [_OUTPUT], {_INPUT: x_val}, rtol=1e-05)
+
+    def test_conv3d_2(self):
+        strides = [1, 2, 3, 1, 1]
+        dilations = [1, 1, 1, 1, 1]
+        x_val = np.random.random_sample([2, 10, 9, 8, 5]).astype(np.float32)
+        w = np.random.random_sample([2, 3, 4, 5, 6]).astype(np.float32)
+        padding = "VALID"
+        def func(x):
+            kernel = tf.constant(w, dtype=tf.float32, name='k')
+            conv = tf.nn.conv3d(x, kernel, strides=strides, padding=padding, data_format="NDHWC", dilations=dilations)
+            return tf.identity(conv, name=_TFOUTPUT)
+        self._run_test_case(func, [_OUTPUT], {_INPUT: x_val}, rtol=1e-05)
+
+    def test_conv3d_3(self):
+        strides = [1, 2, 3, 1, 1]
+        dilations = [1, 1, 1, 1, 1]
+        x_val = np.random.random_sample([2, 10, 9, 8, 5]).astype(np.float32)
+        w = np.random.random_sample([2, 3, 4, 5, 6]).astype(np.float32)
+        padding = "SAME"
+        def func(x):
+            kernel = tf.constant(w, dtype=tf.float32, name='k')
+            conv = tf.nn.conv3d(x, kernel, strides=strides, padding=padding, data_format="NDHWC", dilations=dilations)
+            return tf.identity(conv, name=_TFOUTPUT)
+        self._run_test_case(func, [_OUTPUT], {_INPUT: x_val}, rtol=1e-05)
+
+    def test_avgpool3d(self):
+        strides = [1, 1, 1, 1, 1]
+        ksize = [1, 2, 2, 3, 1]
+        x_val = np.random.random_sample([2, 10, 9, 8, 5]).astype(np.float32)
+        padding = "VALID"
+
+        def func(x):
+            mp = tf.nn.avg_pool3d(x, ksize, strides, padding=padding, data_format="NDHWC")
+            return tf.identity(mp, name=_TFOUTPUT)
+        self._run_test_case(func, [_OUTPUT], {_INPUT: x_val})
+
+    def test_maxpool3d(self):
+        strides = [1, 1, 1, 1, 1]
+        ksize = [1, 2, 2, 3, 1]
+        x_val = np.random.random_sample([2, 10, 9, 8, 5]).astype(np.float32)
+        padding = "VALID"
+
+        def func(x):
+            mp = tf.nn.max_pool3d(x, ksize, strides, padding=padding, data_format="NDHWC")
+            return tf.identity(mp, name=_TFOUTPUT)
+        self._run_test_case(func, [_OUTPUT], {_INPUT: x_val})
+
+    @check_tf_min_version("1.14", "tf.nn.avg_pool2d doesn't exist before tf 1.14")
+    def test_avgpool2d(self):
+        strides = [1, 1, 1, 1]
+        ksize = [1, 2, 3, 1]
+        x_val = make_xval([2, 10, 12, 3])
+        padding = "VALID"
+
+        def func(x):
+            mp = tf.nn.avg_pool2d(x, ksize, strides, padding=padding, data_format="NHWC")
+            return tf.identity(mp, name=_TFOUTPUT)
+        self._run_test_case(func, [_OUTPUT], {_INPUT: x_val})
+
 
     @check_tf_min_version("1.7", "tf only support dilation is 1 for now")
     def test_conv2d_7(self):
@@ -3063,45 +3158,38 @@ class BackendTests(Tf2OnnxBackendTestBase):
     @check_opset_min_version(10, "Conv2DBackpropInput")
     def test_Conv2DBackpropInput_const(self):
         input_sizes_val_ = np.array([1, 10, 10, 3], dtype=np.int32)
-        filter_val_ = np.random.randint(low=0, high=256, size=[3, 3, 3, 5])
-        out_backprop_val_ = np.random.randint(low=0, high=256, size=[1, 10, 10, 5])
-        def func():
+        def func(filter_val, out_backprop_val):
             input_sizes_val = tf.constant(input_sizes_val_, dtype=tf.int32)
-            filter_val = tf.constant(filter_val_, dtype=tf.float32)
-            out_backprop_val = tf.constant(out_backprop_val_, dtype=tf.float32)
             return conv2d_backprop_input(input_sizes=input_sizes_val, filter=filter_val,
                                          out_backprop=out_backprop_val, strides=[1, 1, 1, 1],
                                          padding='SAME', name=_TFOUTPUT)
-        self._run_test_case(func, [_OUTPUT], {})
+        filters_val = np.random.randint(low=0, high=256, size=[3, 3, 3, 5]).astype(np.float32)
+        out_backprop_val = np.random.randint(low=0, high=256, size=[1, 10, 10, 5]).astype(np.float32)
+        self._run_test_case(func, [_OUTPUT], {_INPUT: filters_val, _INPUT1: out_backprop_val})
 
     @check_opset_min_version(10, "Conv2DBackpropInput")
     def test_Conv2DBackpropInput_const_strided(self):
         input_sizes_val_ = np.array([1, 10, 10, 3], dtype=np.int32)
-        filter_val_ = np.random.randint(low=0, high=256, size=[3, 3, 3, 5])
-        out_backprop_val_ = np.random.randint(low=0, high=256, size=[1, 5, 5, 5])
-
-        def func():
+        def func(filter_val, out_backprop_val):
             input_sizes_val = tf.constant(input_sizes_val_, dtype=tf.int32)
-            filter_val = tf.constant(filter_val_, dtype=tf.float32)
-            out_backprop_val = tf.constant(out_backprop_val_, dtype=tf.float32)
             return conv2d_backprop_input(input_sizes=input_sizes_val, filter=filter_val,
                                          out_backprop=out_backprop_val, strides=[1, 2, 2, 1],
                                          padding='SAME', name=_TFOUTPUT)
-        self._run_test_case(func, [_OUTPUT], {})
+        filters_val = np.random.randint(low=0, high=256, size=[3, 3, 3, 5]).astype(np.float32)
+        out_backprop_val = np.random.randint(low=0, high=256, size=[1, 5, 5, 5]).astype(np.float32)
+        self._run_test_case(func, [_OUTPUT], {_INPUT: filters_val, _INPUT1: out_backprop_val})
 
     @check_opset_min_version(10, "Conv2DBackpropInput")
     def test_Conv2DBackpropInput_const_valid(self):
         input_sizes_val_ = np.array([1, 12, 12, 3], dtype=np.int32)
-        filter_val_ = np.random.randint(low=0, high=256, size=[3, 3, 3, 5])
-        out_backprop_val_ = np.random.randint(low=0, high=256, size=[1, 10, 10, 5])
-        def func():
+        def func(filter_val, out_backprop_val):
             input_sizes_val = tf.constant(input_sizes_val_, dtype=tf.int32)
-            filter_val = tf.constant(filter_val_, dtype=tf.float32)
-            out_backprop_val = tf.constant(out_backprop_val_, dtype=tf.float32)
             return conv2d_backprop_input(input_sizes=input_sizes_val, filter=filter_val,
                                          out_backprop=out_backprop_val, strides=[1, 1, 1, 1],
                                          padding='VALID', name=_TFOUTPUT)
-        self._run_test_case(func, [_OUTPUT], {})
+        filters_val = np.random.randint(low=0, high=256, size=[3, 3, 3, 5]).astype(np.float32)
+        out_backprop_val = np.random.randint(low=0, high=256, size=[1, 10, 10, 5]).astype(np.float32)
+        self._run_test_case(func, [_OUTPUT], {_INPUT: filters_val, _INPUT1: out_backprop_val})
 
     @check_opset_min_version(10, "Conv2DBackpropInput")
     def test_Conv2DBackpropInput(self):
@@ -3132,6 +3220,72 @@ class BackendTests(Tf2OnnxBackendTestBase):
         filters_val = np.random.randint(low=0, high=256, size=[3, 3, 3, 5]).astype(np.float32)
         out_backprop_val = np.random.randint(low=0, high=256, size=[1, 10, 10, 5]).astype(np.float32)
         self._run_test_case(func, [_OUTPUT], {_INPUT: input_sizes_val, _INPUT1: filters_val, _INPUT2: out_backprop_val})
+
+    @check_opset_min_version(10, "Conv3DBackpropInputV2")
+    def test_Conv3DBackpropInputV2_const(self):
+        output_shape_val_ = np.array([1, 10, 10, 10, 3], dtype=np.int32)
+        def func(value, filters):
+            output_shape_val = tf.constant(output_shape_val_, dtype=tf.int32)
+            return conv3d_transpose(value, filters, output_shape_val, strides=[1, 1, 1, 1, 1],
+                                    padding='SAME', data_format="NDHWC", name=_TFOUTPUT)
+        filters_val = np.random.randint(low=0, high=256, size=[3, 3, 3, 3, 5]).astype(np.float32)
+        value_val = np.random.randint(low=0, high=256, size=[1, 10, 10, 10, 5]).astype(np.float32)
+        self._run_test_case(func, [_OUTPUT], {_INPUT: value_val, _INPUT1: filters_val}, rtol=1e-6)
+
+    @check_opset_min_version(10, "Conv3DBackpropInputV2")
+    def test_Conv3DBackpropInputV2_const_strided(self):
+        output_shape_val_ = np.array([1, 10, 10, 10, 3], dtype=np.int32)
+        def func(value, filters):
+            output_shape_val = tf.constant(output_shape_val_, dtype=tf.int32)
+            return conv3d_transpose(value, filters, output_shape_val, strides=[1, 2, 2, 2, 1],
+                                    padding='SAME', data_format="NDHWC", name=_TFOUTPUT)
+        filters_val = np.random.randint(low=0, high=256, size=[3, 3, 3, 3, 5]).astype(np.float32)
+        value_val = np.random.randint(low=0, high=256, size=[1, 5, 5, 5, 5]).astype(np.float32)
+        self._run_test_case(func, [_OUTPUT], {_INPUT: value_val, _INPUT1: filters_val}, rtol=1e-6)
+
+    @check_opset_min_version(10, "Conv3DBackpropInputV2")
+    def test_Conv3DBackpropInputV2_const_valid(self):
+        output_shape_val_ = np.array([1, 12, 12, 12, 3], dtype=np.int32)
+        def func(value, filters):
+            output_shape_val = tf.constant(output_shape_val_, dtype=tf.int32)
+            return conv3d_transpose(value, filters, output_shape_val, strides=[1, 1, 1, 1, 1],
+                                    padding='VALID', data_format="NDHWC", name=_TFOUTPUT)
+        filters_val = np.random.randint(low=0, high=256, size=[3, 3, 3, 3, 5]).astype(np.float32)
+        value_val = np.random.randint(low=0, high=256, size=[1, 10, 10, 10, 5]).astype(np.float32)
+        self._run_test_case(func, [_OUTPUT], {_INPUT: value_val, _INPUT1: filters_val}, rtol=1e-6)
+
+    @check_opset_min_version(10, "Conv3DBackpropInputV2")
+    def test_Conv3DBackpropInputV2(self):
+        def func(value, filters, output_shape):
+            return conv3d_transpose(value, filters, output_shape, strides=[1, 1, 1, 1, 1],
+                                    padding='SAME', data_format="NDHWC", name=_TFOUTPUT)
+        filters_val = np.random.randint(low=0, high=256, size=[2, 3, 4, 4, 5]).astype(np.float32)
+        value_val = np.random.randint(low=0, high=256, size=[2, 7, 8, 9, 5]).astype(np.float32)
+        output_shape_val = np.array([2, 7, 8, 9, 4], dtype=np.int32)
+        self._run_test_case(func, [_OUTPUT], {_INPUT: value_val, _INPUT1: filters_val, _INPUT2: output_shape_val},
+                            rtol=1e-6)
+
+    @check_opset_min_version(10, "Conv3DBackpropInputV2")
+    def test_Conv3DBackpropInputV2_strided(self):
+        def func(value, filters, output_shape):
+            return conv3d_transpose(value, filters, output_shape, strides=[1, 2, 2, 2, 1],
+                                    padding='SAME', data_format="NDHWC", name=_TFOUTPUT)
+        filters_val = np.random.randint(low=0, high=256, size=[3, 3, 3, 3, 5]).astype(np.float32)
+        value_val = np.random.randint(low=0, high=256, size=[1, 5, 5, 5, 5]).astype(np.float32)
+        output_shape_val = np.array([1, 10, 10, 10, 3], dtype=np.int32)
+        self._run_test_case(func, [_OUTPUT], {_INPUT: value_val, _INPUT1: filters_val, _INPUT2: output_shape_val},
+                            rtol=1e-6)
+
+    @check_opset_min_version(10, "Conv3DBackpropInputV2")
+    def test_Conv3DBackpropInputV2_valid(self):
+        def func(value, filters, output_shape):
+            return conv3d_transpose(value, filters, output_shape, strides=[1, 1, 1, 1, 1],
+                                    padding='VALID', data_format="NDHWC", name=_TFOUTPUT)
+        filters_val = np.random.randint(low=0, high=256, size=[3, 3, 3, 3, 5]).astype(np.float32)
+        value_val = np.random.randint(low=0, high=256, size=[1, 10, 10, 10, 5]).astype(np.float32)
+        output_shape_val = np.array([1, 12, 12, 12, 3], dtype=np.int32)
+        self._run_test_case(func, [_OUTPUT], {_INPUT: value_val, _INPUT1: filters_val, _INPUT2: output_shape_val},
+                            rtol=1e-6)
 
     @check_opset_min_version(8, "CategoryMapper")
     @skip_tf2()
@@ -3352,6 +3506,65 @@ class BackendTests(Tf2OnnxBackendTestBase):
             return tf.raw_ops.MatrixSetDiagV3(input=base_matrix, diagonal=diag, k=k, align='RIGHT_LEFT', name=_TFOUTPUT)
 
         self._run_test_case(func, [_OUTPUT], {_INPUT: input_val, _INPUT1: diag_val, _INPUT2: k_val})
+
+    @check_opset_min_version(10)
+    @check_tf_min_version("1.14")
+    def test_fakequant_with_min_max(self):
+        def func(x):
+            ret = fake_quant_with_min_max_args(
+                x, min=-1024, max=1023, num_bits=8, narrow_range=False, name=None)
+            return tf.identity(ret, name=_TFOUTPUT)
+
+        x_val = np.random.random(size=[4, 3]).astype(np.float32) * 2048. - 1024.
+        x_val0 = np.abs(x_val)
+        self._run_test_case(func, [_OUTPUT], {_INPUT: x_val0}, rtol=1e-6, atol=1e-4)
+        self._run_test_case(func, [_OUTPUT], {_INPUT: x_val}, rtol=1e-6, atol=1e-4)
+
+        x_val = np.random.random(size=[4, 3]).astype(np.float32) * 2048. - 1024
+        x_val[0, 0] = -1024
+        x_val[0, 1] = -1023
+        x_val[0, 2] = 1024
+        x_val[1, 0] = 1023
+        x_val[1, 1] = 1025
+        x_val[1, 2] = -1025
+        self._run_test_case(func, [_OUTPUT], {_INPUT: x_val}, rtol=1e-6, atol=1e-4)
+
+    @check_opset_min_version(10)
+    @check_tf_min_version("1.14")
+    def test_fakequant_with_min_max_same_sign(self):
+        def func_neg(x):
+            ret = fake_quant_with_min_max_args(
+                x, min=-1024*3, max=-1024, num_bits=8, narrow_range=False, name=None)
+            return tf.identity(ret, name=_TFOUTPUT)
+
+        x_val = np.random.random(size=[4, 3]).astype(np.float32) * 2048. - 1024 * 3.
+        try:
+            self._run_test_case(func_neg, [_OUTPUT], {_INPUT: x_val}, rtol=1e-6, atol=1e-4)
+        except ValueError:
+            pass
+
+    @check_opset_min_version(9, "atan2")
+    def test_atan2(self):
+        # Test all possible pairs of pos, neg, zero for x and y.
+
+        def atan2(y, x):
+            sx = np.sign(x)
+            sy = np.sign(y)
+            pi_part = (sy + sx * (sy ** 2 - 1)) * (sx - 1) * (-np.pi/2)
+            atan_part = np.arctan(y / (x + (1 - sx ** 2))) * sx ** 2
+            return atan_part + pi_part
+
+        test_pairs = [[y, x] for x in [3., -4., 0.] for y in [5., -6., 0.]]
+        y_val = np.array([y for y, x in test_pairs], dtype=np.float32)
+        x_val = np.array([x for y, x in test_pairs], dtype=np.float32)
+        assert_almost_equal(np.arctan2(y_val, x_val), atan2(y_val, x_val))
+
+        def func(y, x):
+            atan2_ = tf.math.atan2(y, x)
+            return tf.identity(atan2_, name=_TFOUTPUT)
+
+        self._run_test_case(
+            func, [_OUTPUT], {_INPUT: y_val, _INPUT2: x_val}, rtol=1e-06)
 
 
 if __name__ == '__main__':

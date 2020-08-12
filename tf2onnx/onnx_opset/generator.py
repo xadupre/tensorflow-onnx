@@ -186,7 +186,8 @@ class Iterator:
 class IteratorGetNext:
     @classmethod
     def version_8(cls, ctx, node, **kwargs):
-        output_names = node.output
+        output_names = node.output.copy()  # to make sure remove_node
+                                           # does not alter the list
         type_0 = ctx.get_dtype(output_names[0])
         type_1 = ctx.get_dtype(output_names[1])
         shape_0 = ctx.get_shape(output_names[0])
@@ -196,11 +197,12 @@ class IteratorGetNext:
         ctx.add_graph_input(output_names[1], type_1, shape_1)
 
 
-@tf_op("QueueDequeueManyV2")
+@tf_op(["QueueDequeueManyV2", "QueueDequeueUpToV2"])
 class QueueDequeueManyV2:
     @classmethod
     def version_8(cls, ctx, node, **kwargs):
-        outputs = node.output
+        outputs = node.output.copy()  # copy to make remove_node
+                                      # does not alter the list
         shapes = node.output_shapes
         dtypes = node.output_dtypes
         ctx.remove_node(node.name)
