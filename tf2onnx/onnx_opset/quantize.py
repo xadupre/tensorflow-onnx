@@ -70,7 +70,7 @@ class FakeQuantWithMinMaxArgs:
             op_name_scope=node.name, attr={"axis": axis},
             shapes=[shape], dtypes=[idtype])
         output_name = new_node.output[0]
-        node.input[0] = output_name
+        ctx.replace_input(node, node.input[0], output_name, 0)
 
         ctx.remove_node(node.name)
 
@@ -78,4 +78,4 @@ class FakeQuantWithMinMaxArgs:
             "DequantizeLinear", [new_node.output[0], pb_scale.name, zero_point.name],
             op_name_scope=node.name, attr={"axis": axis},
             shapes=[shape], dtypes=[dtype])
-        ctx.replace_all_inputs(ctx.get_nodes(), node.output[0], last_node.output[0])
+        ctx.replace_all_inputs(None, node.output[0], last_node.output[0], keep_ops=False)  # ctx.get_nodes()

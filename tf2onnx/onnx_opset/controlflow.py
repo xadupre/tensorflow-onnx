@@ -11,7 +11,6 @@ from __future__ import unicode_literals
 
 import copy
 import logging
-import sys
 
 import numpy as np
 
@@ -375,7 +374,7 @@ class Select:
             broadcast_shape = [cond_shape[0]] + [1] * (input_rank - 1)
             shape_const = ctx.make_const(utils.make_name(node.name), np.array(broadcast_shape, dtype=np.int64))
             reshape = ctx.make_node("Reshape", [node.input[0], shape_const.output[0]])
-            ctx.replace_input(node, node.input[0], reshape.output[0])
+            ctx.replace_input(node, node.input[0], reshape.output[0], 0)
 
 
 @tf_op("Where")
@@ -457,7 +456,7 @@ class TensorListGetItem:
     def version_7(cls, ctx, node, **kwargs):
         ctx.ta_reads.append(node.input[0])
         node.type = "Gather"
-        node.input = [node.input[0], node.input[1]]
+        ctx.replace_inputs(node, [node.input[0], node.input[1]])
         ctx.insert_new_node_on_input(node, "Unsqueeze", node.input[1], name=node.child_name(), axes=[0])
         ctx.insert_new_node_on_output("Squeeze", node.output[0], name=node.child_name(), axes=[0])
 
@@ -493,7 +492,7 @@ class TensorListStack:
     def version_7(cls, ctx, node, **kwargs):
         if node.inputs[0].is_while():
             ctx.remove_node(node.name)
-            ctx.replace_all_inputs(ctx.get_nodes(), node.output[0], node.input[0])
+            ctx.replace_all_inputs(None, node.output[0], node.input[0], keep_ops=False)  # ctx.get_nodes()
 
 
 @tf_op(["While", "StatelessWhile"])
@@ -524,7 +523,7 @@ class While:
         maximum_iterations_name = node.input[1]
         maximum_iterations = node.inputs[1].get_tensor_value()
         if maximum_iterations == -1:
-            maximum_iterations = sys.maxsize
+            maximum_iterations = np.iinfo(np.int64).max
         consumers = ctx.find_output_consumers(maximum_iterations_name)
         external_consumers = [c for c in consumers if c != node and c.type != 'TensorListReserve']
         if len(external_consumers) == 0:
@@ -532,7 +531,7 @@ class While:
         else:
             maximum_iterations_name = utils.make_name(node.inputs[1].name)
         ctx.make_const(maximum_iterations_name, np.array(maximum_iterations, dtype=np.int64))
-        node.input[1] = maximum_iterations_name
+        ctx.replace_input(node, node.input[1], maximum_iterations_name, 1)
 
         cond_name = node.get_attr_str("cond")
         cond_graph = find_function(cond_name)
@@ -578,12 +577,12 @@ class While:
             del output_names[idx]
             del body.outputs[idx]
 
-        removed_scan_outputs = {}
         # remove tensor array that are passed in to the loop
+        removed_scan_outputs = {}
         for idx, n in reversed(to_remove):
             ctx.remove_node(n.name)
             # make the node output bad
-            ctx.replace_all_inputs(ctx.get_nodes(), n.output[0], "@@ALLOC")
+            ctx.replace_all_inputs(None, n.output[0], "@@ALLOC", keep_ops=False)  # ctx.get_nodes()
             del body.func_inputs[idx]
             del cond_graph.func_inputs[idx]
             del tf_while_inputs[idx]
@@ -619,7 +618,7 @@ class While:
 
         # shift output consumers
         for k, v in output_map.items():
-            ctx.replace_all_inputs(ctx.get_nodes(), k, v)
+            ctx.replace_all_inputs(None, k, v, keep_ops=False)  # ctx.get_nodes()
 
         wire_while_body(ctx, body, loop_node.inputs, body_input_to_state_var, cond_input_to_state_var, output_shapes,
                         output_dtypes, body_name, node.name, cond_graph, tf_while_inputs, removed_scan_outputs)
@@ -643,7 +642,7 @@ def wire_while_body(parent_g, g, loop_node_inputs, body_input_to_state_var, cond
     for n in g.inputs:
         if n.output[0] in body_input_to_state_var:
             n.type = "Identity"
-            n.input = [body_input_to_state_var[n.output[0]]]
+            g.replace_inputs(n, [body_input_to_state_var[n.output[0]]])
 
     # onnx will pass in cond as argument
     cond_node = g.make_node("Placeholder", [], name=utils.make_name("cond"),
@@ -674,7 +673,7 @@ def wire_while_body(parent_g, g, loop_node_inputs, body_input_to_state_var, cond
             node.type = "Identity"
             g.set_shape(node.output[0], g.get_shape(node.input[2]))
             g.set_dtype(node.output[0], g.get_dtype(node.input[2]))
-            node.input = [node.input[2]]
+            g.replace_inputs(node, [node.input[2]])
             scan_outputs.append(node.output[0])
 
     if len(scan_outputs) != len(removed_scan_outputs):
@@ -730,7 +729,7 @@ def wire_if_branch(parent_g, g, inputs, output_shapes, output_dtypes, scope, par
     for node in g.inputs:
         parent_name = binding.get(node.output[0])
         if parent_name and parent_name != "@@ALLOC":
-            node.input = [parent_name]
+            g.replace_inputs(node, [parent_name])
             node.type = "Identity"
         else:
             to_remove.append(node)
@@ -754,7 +753,7 @@ def inline_subgraph(parent, g, scope, binding):
     for node in g.inputs:
         parent_name = binding.get(node.output[0])
         if parent_name and parent_name != "@@ALLOC":
-            node.input = [parent_name]
+            g.replace_inputs(node, [parent_name])
             node.type = "Identity"
         else:
             to_remove.append(node)
@@ -814,7 +813,7 @@ def prefix_graph(g, scope):
                 if old_output == oname:
                     g.outputs[i] = new_output
                     break
-            g.replace_all_inputs(ops, old_output, new_output)
+            g.replace_all_inputs(ops, old_output, new_output, keep_ops=True)
         to_remove.append(node)
     for node in to_remove:
         g.remove_node(node.name)
