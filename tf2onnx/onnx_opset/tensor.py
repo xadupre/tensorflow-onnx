@@ -108,10 +108,6 @@ class Dropout:
 class Identity:
     @classmethod
     def version_1(cls, ctx, node, **kwargs):
-        if node.inputs[0] is None:
-            raise RuntimeError(
-                "Issue with node {}\nI={}\nO={}.".format(
-                    node, node.input, node.output))
         if node.inputs[0].is_const():
             # should not remove the identity node if it is output of the graph
             if node.output[0] in ctx.outputs:
@@ -119,7 +115,7 @@ class Identity:
             # if identity has a const as input, remove it
             input_name = node.input[0]
             output_name = node.output[0]
-            ctx.replace_all_inputs(None, output_name, input_name, keep_ops=False)  # ctx.get_nodes()
+            ctx.replace_all_inputs(output_name, input_name)  # ops=ctx.get_nodes()
             ctx.remove_node(node.name)
 
 
@@ -129,7 +125,7 @@ class IdentityN:
     def version_1(cls, ctx, node, **kwargs):
         ctx.remove_node(node.name)
         for input_name, output_name in zip(node.input, node.output):
-            ctx.replace_all_inputs(None, output_name, input_name, keep_ops=False)  # ctx.get_nodes()
+            ctx.replace_all_inputs(output_name, input_name)  # ops=ctx.get_nodes()
 
 
 @tf_op("Reshape")
@@ -273,13 +269,13 @@ class ConcatV2:
             raise RuntimeError("all inputs of {} are empty".format(node.name))
 
         axis_node = node.inputs[-1]
-        utils.make_sure(axis_node.is_const(), "%r needs to be const", axis_node.name)
+        utils.make_sure(axis_node.is_const(), "{} needs to be const".format(axis_node.name))
         axis_val = axis_node.get_tensor_value()
         ctx.remove_input(node, node.input[-1], len(node.input) - 1)
 
         if axis_val < 0:  # onnxruntime does not support -1 axis, but TF supports.
             input_shape = ctx.get_shape(node.input[0])
-            utils.make_sure(input_shape is not None, "shape of %r is None", node.input[0])
+            utils.make_sure(input_shape is not None, "shape of {} is None".format(node.input[0]))
             axis_val = len(input_shape) + axis_val
         node.set_attr("axis", axis_val)
 
@@ -1054,7 +1050,7 @@ class Pack:
         # concat all unqueezes
         concat = ctx.make_node("Concat", inputs, op_name_scope=node.name, attr={"axis": axis},
                                shapes=shapes, dtypes=dtypes)
-        ctx.replace_all_inputs(None, node.output[0], concat.output[0], keep_ops=False)  # ctx.get_nodes()
+        ctx.replace_all_inputs(node.output[0], concat.output[0])  # ops=ctx.get_nodes()
 
 
 @tf_op("Unpack")
