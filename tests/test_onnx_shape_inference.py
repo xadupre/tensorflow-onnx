@@ -385,9 +385,13 @@ class ONNXShapeInferenceTests(Tf2OnnxBackendTestBase):
             graph.update_node_shape_dtype(if_node)
         except ValueError as e:
             rows = [test_input_shapes, test_input_dtypes, test_shapes, test_dtypes]
-            raise AssertionError('\n'.join(map(str, rows))) from e
+            raise AssertionError("update_node_shape_dtype\n" + '\n'.join(map(str, rows))) from e
 
-        graph.add_graph_output(if_node.output[0])
+        try:
+            graph.add_graph_output(if_node.output[0])
+        except ValueError as e:
+            rows = [test_input_shapes, test_input_dtypes, test_shapes, test_dtypes]
+            raise AssertionError("add_graph_output\n" + '\n'.join(map(str, rows))) from e
         self._run_test_case(graph, self._generate_random_inputs(inputs, shapes, dtypes))
 
     def test_loop(self):
