@@ -11,9 +11,11 @@ import unittest
 from distutils.version import StrictVersion
 import numpy as np
 import onnx
+from onnx import helper
 from onnx import TensorProto
 from tf2onnx import utils
 from tf2onnx.graph import Graph
+from tf2onnx.schemas import infer_onnx_shape_dtype
 from backend_test_base import Tf2OnnxBackendTestBase
 from common import *  # pylint: disable=wildcard-import,unused-wildcard-import
 
@@ -364,8 +366,26 @@ class ONNXShapeInferenceTests(Tf2OnnxBackendTestBase):
         if_node.set_body_graph_as_attr("then_branch", then_subgraph)
         if_node.set_body_graph_as_attr("else_branch", else_subgraph)
 
+        test_initializers = []
+        for i, inp in enumerate(if_node.inputs):
+            if inp is None:
+                continue
+            if inp.is_const():
+                t = inp.get_attr("value")
+                tensor = helper.get_attribute_value(t)
+                tensor.name = inp.output[0]
+                test_initializers.append(tensor)
+        test_input_shapes = [graph.get_shape(i) for i in if_node.input]
+        test_input_dtypes = [graph.get_dtype(i) for i in if_node.input]
+        test_shapes, test_dtypes = infer_onnx_shape_dtype(
+            if_node, graph._opset, test_input_shapes, test_input_dtypes, test_initializers)
+
         # explicitly infer shape for if node
-        graph.update_node_shape_dtype(if_node)
+        try:
+            graph.update_node_shape_dtype(if_node)
+        except ValueError as e:
+            rows = [test_input_shapes, test_input_dtypes, test_shapes, test_dtypes]
+            raise AssertionError('\n'.join(map(str, rows))) from e
 
         graph.add_graph_output(if_node.output[0])
         self._run_test_case(graph, self._generate_random_inputs(inputs, shapes, dtypes))
@@ -419,4 +439,8 @@ class ONNXShapeInferenceTests(Tf2OnnxBackendTestBase):
 
 
 if __name__ == "__main__":
+    #cl = ONNXShapeInferenceTests()
+    #cl.setUp()
+    #cl.test_if()
+    #stop
     unittest_main()
