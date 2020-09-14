@@ -13,3 +13,7 @@ __pycache__
 .eggs
 *.egg-info
 run.sh
+tools/_cache
+tools/perf.txt
+tools/_temp_run_pretrained
+tests/_cache
