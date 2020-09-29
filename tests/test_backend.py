@@ -24,6 +24,7 @@ from common import *  # pylint: disable=wildcard-import,unused-wildcard-import
 from tf2onnx import constants, utils
 from tf2onnx.graph_matcher import OpTypePattern, GraphMatcher
 from tf2onnx.tf_loader import is_tf2
+from tf2onnx.onnx_opset.signal import make_dft_constant
 
 # pylint: disable=missing-docstring,invalid-name,unused-argument,function-redefined,cell-var-from-loop
 
@@ -2823,7 +2824,7 @@ class BackendTests(Tf2OnnxBackendTestBase):
 
         self._run_test_case(func, [_OUTPUT, _OUTPUT1], {_INPUT: boxes_val, _INPUT1: scores_val})
 
-    @check_opset_min_version(11, "NonMaxSuppressionV4")
+    @check_opset_min_version(10, "NonMaxSuppressionV4")
     def test_non_max_suppression_v4(self):
         box_num = 10
         boxes_val = np.random.random_sample([box_num, 4]).astype(np.float32)
@@ -2836,7 +2837,7 @@ class BackendTests(Tf2OnnxBackendTestBase):
 
         self._run_test_case(func, [_OUTPUT, _OUTPUT1], {_INPUT: boxes_val, _INPUT1: scores_val})
 
-    @check_opset_min_version(11, "NonMaxSuppressionV4")
+    @check_opset_min_version(10, "NonMaxSuppressionV4")
     def test_non_max_suppression_v4_no_padding(self):
         box_num = 10
         boxes_val = np.random.random_sample([box_num, 4]).astype(np.float32)
@@ -2850,7 +2851,7 @@ class BackendTests(Tf2OnnxBackendTestBase):
         self._run_test_case(func, [_OUTPUT, _OUTPUT1], {_INPUT: boxes_val, _INPUT1: scores_val})
 
     @check_tf_min_version("1.15")
-    @check_opset_min_version(11, "NonMaxSuppressionV5")
+    @check_opset_min_version(10, "NonMaxSuppressionV5")
     def test_non_max_suppression_v5(self):
         box_num = 10
         boxes_val = np.random.random_sample([box_num, 4]).astype(np.float32)
@@ -3624,6 +3625,57 @@ class BackendTests(Tf2OnnxBackendTestBase):
                           [1., 3., 1.],
                           [1., 1., 4.]], dtype=np.float32).reshape(_KERNEL3x3)
         self._conv_kernel_as_input_test(x_val, w_val)
+
+    def test_equal_with_different_parameters(self):
+        input_val = np.array([5], dtype=np.int32)
+
+        def func(input_val):
+            tensor = tf.zeros(input_val)
+            input_size = tf.size(tensor)
+            constant = tf.constant(3, dtype=tf.int32)
+            return tf.math.equal(input_size, constant, name="output")
+
+        feed_dict = {"input:0": input_val}
+        input_names_with_port = ["input:0"]
+        output_names_with_port = ["output:0"]
+
+        current_opset = self.config.opset
+        self.config.opset = 12
+        self.run_test_case(func, feed_dict, input_names_with_port, output_names_with_port)
+        self.config.opset = current_opset
+
+    @check_tf_min_version("1.14")
+    def test_rfft_ops(self):
+
+        def dft_slow(x, M):
+            xt = x.T
+            res = np.dot(M, xt)
+            return np.transpose(res, (0, 2, 1))
+
+        x_val = make_xval([2, 4]).astype(np.float32)
+        M_both = make_dft_constant(x_val.shape[1], x_val.dtype, x_val.shape[1])
+        fft = dft_slow(x_val, M_both)
+        fft_npy = np.fft.rfft(x_val)
+        assert_almost_equal(fft[0, :, :], np.real(fft_npy))
+        assert_almost_equal(fft[1, :, :], np.imag(fft_npy))
+
+        x_val = make_xval([3, 4]).astype(np.float32)
+        def func1(x):
+            op_ = tf.signal.rfft(x)
+            return tf.abs(op_, name=_TFOUTPUT)
+        self._run_test_case(func1, [_OUTPUT], {_INPUT: x_val})
+
+        def func2(x):
+            op_ = tf.signal.rfft(x)
+            return tf.cos(op_, name=_TFOUTPUT)
+        with self.assertRaises(ValueError):
+            self._run_test_case(func2, [_OUTPUT], {_INPUT: x_val})
+
+        def func3(x):
+            op_ = tf.signal.rfft(x)
+            return tf.identity(op_, name=_TFOUTPUT)
+        with self.assertRaises(ValueError):
+            self._run_test_case(func3, [_OUTPUT], {_INPUT: x_val})
 
 
 if __name__ == '__main__':

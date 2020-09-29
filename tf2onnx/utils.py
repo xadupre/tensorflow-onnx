@@ -20,7 +20,7 @@ from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 import numpy as np
 from google.protobuf import text_format
-from onnx import helper, onnx_pb, defs, numpy_helper, __version__
+from onnx import helper, onnx_pb, defs, numpy_helper, ModelProto, __version__
 
 from . import constants
 
@@ -40,6 +40,8 @@ ONNX_TO_NUMPY_DTYPE = {
     onnx_pb.TensorProto.INT64: np.int64,
     onnx_pb.TensorProto.UINT64: np.uint64,
     onnx_pb.TensorProto.BOOL: np.bool,
+    onnx_pb.TensorProto.COMPLEX64: np.complex64,
+    onnx_pb.TensorProto.COMPLEX128: np.complex128,
 }
 
 #
@@ -56,7 +58,9 @@ ONNX_DTYPE_NAMES = {
     onnx_pb.TensorProto.UINT16: "uint16",
     onnx_pb.TensorProto.INT64: "int64",
     onnx_pb.TensorProto.STRING: "string",
-    onnx_pb.TensorProto.BOOL: "bool"
+    onnx_pb.TensorProto.BOOL: "bool",
+    onnx_pb.TensorProto.COMPLEX64: "complex64",
+    onnx_pb.TensorProto.COMPLEX128: "complex128"
 }
 
 
@@ -269,6 +273,22 @@ def save_protobuf(path, message, as_text=False):
         with open(path, "wb") as f:
             f.write(message.SerializeToString())
 
+def model_proto_from_file(model_path):
+    model_proto = ModelProto()
+    with open(model_path, "rb") as f:
+        model_proto.ParseFromString(f.read())
+    return model_proto
+
+def model_proto_from_zip(zip_path, external_tensor_storage):
+    model_proto = ModelProto()
+    with zipfile.ZipFile(zip_path, 'r') as z:
+        for n in z.namelist():
+            f = z.open(n)
+            if n.endswith(".onnx"):
+                model_proto.ParseFromString(f.read())
+            else:
+                external_tensor_storage.name_to_tensor_data[n] = f.read()
+    return model_proto
 
 def is_list_or_tuple(obj):
     return isinstance(obj, (list, tuple))
