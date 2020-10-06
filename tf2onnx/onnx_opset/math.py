@@ -48,7 +48,10 @@ class DirectOp:
 
     @classmethod
     def version_6(cls, ctx, node, **kwargs):
-        pass
+        if node.type == "Log":
+            # ORT doesn't implement Log on doubles
+            double_to_float = {onnx_pb.TensorProto.DOUBLE: onnx_pb.TensorProto.FLOAT}
+            node.maybe_cast_input([[onnx_pb.TensorProto.FLOAT]], double_to_float)
 
 
 @tf_op(["Acos", "Asin", "Atan", "Cos", "Sin", "Tan"])
@@ -592,11 +595,6 @@ class IsFinite:
 @tf_op("Atan2")
 class Atan2Op:
     # support more dtype
-    supported_dtypes = [
-        onnx_pb.TensorProto.FLOAT,
-        onnx_pb.TensorProto.FLOAT16,
-        onnx_pb.TensorProto.DOUBLE
-    ]
 
     @classmethod
     def version_9(cls, ctx, node, **kwargs):
@@ -612,8 +610,14 @@ class Atan2Op:
                 atan_part = numpy.arctan(y / (x + (1 - sx ** 2))) * sx ** 2
                 return atan_part + pi_part
         """
+        supported_dtypes = [
+            onnx_pb.TensorProto.FLOAT,
+            onnx_pb.TensorProto.FLOAT16,
+            onnx_pb.TensorProto.DOUBLE
+        ]
 
         onnx_dtype = ctx.get_dtype(node.input[0])
+        utils.make_sure(onnx_dtype in supported_dtypes, "Unsupported input type.")
         shape = ctx.get_shape(node.input[0])
         np_dtype = utils.map_onnx_to_numpy_type(onnx_dtype)
 
@@ -696,4 +700,35 @@ class Atan2Op:
             "Add", inputs=[atan_node.output[0], pi_part.output[0]],
             op_name_scope=node.name + 'all',
             shapes=[shape], dtypes=[onnx_dtype])
+        ctx.replace_all_inputs(node.output[0], last_node.output[0])  # ops=ctx.get_nodes()
+
+
+@tf_op("InvertPermutation")
+class InvertPermutationOp:
+
+    @classmethod
+    def version_11(cls, ctx, node, **kwargs):
+
+        supported_dtypes = [onnx_pb.TensorProto.INT32, onnx_pb.TensorProto.INT64]
+        onnx_dtype = ctx.get_dtype(node.input[0])
+        utils.make_sure(onnx_dtype in supported_dtypes, "InvertPermutation only applies on INT32, INT64.")
+
+        shape = ctx.get_shape(node.input[0])
+
+        shape_node = ctx.make_node(
+            "Shape", inputs=node.input, name=utils.make_name(node.name + '_shape'))
+
+        neg_node = ctx.make_node(
+            "Neg", inputs=node.input, name=utils.make_name(node.name + '_neg'))
+
+        topk_node = ctx.make_node(
+            "TopK", inputs=[neg_node.output[0], shape_node.output[0]],
+            name=utils.make_name(node.name + '_topk'), output_count=2)
+
+        ctx.remove_node(node.name)
+
+        last_node = ctx.make_node(
+            "Identity", inputs=topk_node.output[1:], name=utils.make_name(node.name + '_indices'),
+            shapes=[shape], dtypes=[onnx_dtype])
+
         ctx.replace_all_inputs(node.output[0], last_node.output[0])  # ops=ctx.get_nodes()
