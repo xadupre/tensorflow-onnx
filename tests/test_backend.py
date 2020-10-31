@@ -1213,6 +1213,22 @@ class BackendTests(Tf2OnnxBackendTestBase):
             return tf.identity(x_, name=_TFOUTPUT)
         self._run_test_case(func, [_OUTPUT], {_INPUT: x_val1})
 
+    def test_slice_from_shape_const_fold(self):
+        x_val = np.array([4, 3], dtype=np.int64)
+        x_shape = np.array([-1, 3], dtype=np.int64)
+        def func(x):
+            z = tf.zeros(x)
+            x = tf.reshape(z, tf.constant(x_shape))
+            s = tf.shape(x)
+            t1 = tf.constant([1], dtype=tf.int32)
+            t2 = tf.constant([2], dtype=tf.int32)
+            y = tf.strided_slice(s, t1, t2, shrink_axis_mask=1)
+            return tf.identity(y, name=_TFOUTPUT)
+        def graph_validator(g):
+            # After constant folding just an input and const output node remain
+            return len(g.get_nodes()) == 2
+        self._run_test_case(func, [_OUTPUT], {_INPUT: x_val}, graph_validator=graph_validator)
+
     def test_slice(self):
         x_val = np.array([[1, 2, 3, 4], [5, 6, 7, 8]], dtype=np.float32)
         def func(x):
@@ -2102,6 +2118,19 @@ class BackendTests(Tf2OnnxBackendTestBase):
             return tf.identity(x_, name=_TFOUTPUT)
         _ = self._run_test_case(func, [_OUTPUT], {_INPUT: x_val})
 
+    @skip_caffe2_backend()
+    @check_tf_min_version("1.14")
+    @check_opset_min_version(11, "coordinate_transformation_mode attr")
+    def test_resize_bilinear_half_pixel_centers(self):
+        x_shape = [1, 15, 20, 2]
+        x_new_size = [30, 40]
+        x_val = np.arange(1, 1 + np.prod(x_shape)).astype("float32").reshape(x_shape)
+        def func(x):
+            x_new_size_ = tf.constant(x_new_size)
+            x_ = resize_bilinear(x, x_new_size_, half_pixel_centers=True)
+            return tf.identity(x_, name=_TFOUTPUT)
+        _ = self._run_test_case(func, [_OUTPUT], {_INPUT: x_val})
+
     @check_opset_min_version(9, "resize_bilinear")
     def test_resize_bilinear_with_non_const(self):
         x_shape = [3, 10, 8, 5]
@@ -2142,6 +2171,18 @@ class BackendTests(Tf2OnnxBackendTestBase):
         def func(x):
             x_new_size_ = tf.constant(x_new_size)
             x_ = resize_nearest_neighbor(x, x_new_size_)
+            return tf.identity(x_, name=_TFOUTPUT)
+        _ = self._run_test_case(func, [_OUTPUT], {_INPUT: x_val})
+
+    @check_tf_min_version("1.14")
+    @check_opset_min_version(11, "coordinate_transformation_mode attr")
+    def test_resize_nearest_neighbor_half_pixel_centers(self):
+        x_shape = [1, 10, 20, 2]
+        x_new_size = [20, 40]
+        x_val = np.arange(1, 1 + np.prod(x_shape)).astype("float32").reshape(x_shape)
+        def func(x):
+            x_new_size_ = tf.constant(x_new_size)
+            x_ = resize_nearest_neighbor(x, x_new_size_, half_pixel_centers=True)
             return tf.identity(x_, name=_TFOUTPUT)
         _ = self._run_test_case(func, [_OUTPUT], {_INPUT: x_val})
 
@@ -3158,6 +3199,30 @@ class BackendTests(Tf2OnnxBackendTestBase):
             return tf.identity(x_, name=_TFOUTPUT)
         self._run_test_case(func, [_OUTPUT], {_INPUT: x_val})
 
+    @check_tf_min_version("1.14", "tensor_scatter_nd_update needs tf 1.14")
+    @check_opset_min_version(11, "ScatterND")
+    def test_tensor_scatter_update(self):
+        x_val = np.array([10, 20, 30, 40], dtype=np.int32).reshape((4))
+        y_val = np.array([0, 2], dtype=np.int64).reshape((2, 1))
+        z_val = np.array([8, 11], dtype=np.int32).reshape((2))
+
+        def func(x, y, z):
+            x_ = tf.tensor_scatter_nd_update(x, y, z)
+            return tf.identity(x_, name=_TFOUTPUT)
+        self._run_test_case(func, [_OUTPUT], {_INPUT: x_val, _INPUT1: y_val, _INPUT2: z_val})
+
+    @check_tf_min_version("1.14", "tensor_scatter_nd_update needs tf 1.14")
+    @check_opset_min_version(11, "ScatterND")
+    def test_tensor_scatter_update_cast_indices(self):
+        x_val = np.array([10, 20, 30, 40], dtype=np.int32).reshape((4))
+        y_val = np.array([0, 2], dtype=np.int32).reshape((2, 1))
+        z_val = np.array([8, 11], dtype=np.int32).reshape((2))
+
+        def func(x, y, z):
+            x_ = tf.tensor_scatter_nd_update(x, y, z)
+            return tf.identity(x_, name=_TFOUTPUT)
+        self._run_test_case(func, [_OUTPUT], {_INPUT: x_val, _INPUT1: y_val, _INPUT2: z_val})
+
     @check_opset_min_version(11, "ScatterND")
     def test_scatternd_1d(self):
         x_val = np.array([4, 3, 1, 7], dtype=np.int32).reshape((4, 1))
@@ -3218,6 +3283,31 @@ class BackendTests(Tf2OnnxBackendTestBase):
         out_backprop_val = np.random.randint(low=0, high=256, size=[1, 5, 5, 5]).astype(np.float32)
         self._run_test_case(func, [_OUTPUT], {_INPUT: filters_val, _INPUT1: out_backprop_val})
 
+    @check_tf_min_version("1.15", "tf.repeat needs tf 1.15")
+    @check_opset_min_version(10, "Conv2DBackpropInput")
+    def test_Conv2DBackpropInput_shape_implied(self):
+        batch_dim_val = np.array(1, dtype=np.int32)
+        def func(filter_val, out_backprop_val, batch_dim):
+            out_backprop_val = tf.repeat(out_backprop_val, batch_dim, axis=0)
+            s = tf.shape(out_backprop_val)
+            t1 = tf.constant([0], dtype=tf.int32)
+            t2 = tf.constant([1], dtype=tf.int32)
+            batch_dim = tf.strided_slice(s, t1, t2, shrink_axis_mask=1)
+            # Sometimes the size given is a stack of constants with unknown batch dim
+            input_sizes_val = tf.stack([batch_dim, 10, 10, 3])
+            return conv2d_backprop_input(input_sizes=input_sizes_val, filter=filter_val,
+                                         out_backprop=out_backprop_val, strides=[1, 2, 2, 1],
+                                         padding='SAME', name=_TFOUTPUT)
+        filters_val = np.random.randint(low=0, high=256, size=[3, 3, 3, 5]).astype(np.float32)
+        out_backprop_val = np.random.randint(low=0, high=256, size=[1, 5, 5, 5]).astype(np.float32)
+        def graph_validator(g):
+            for n in g.get_nodes():
+                if n.type == 'ConvTranspose':
+                    return "output_shape" in n.attr
+            return False
+        self._run_test_case(func, [_OUTPUT], {_INPUT: filters_val, _INPUT1: out_backprop_val, _INPUT2: batch_dim_val},
+                            graph_validator=graph_validator)
+
     @check_opset_min_version(10, "Conv2DBackpropInput")
     def test_Conv2DBackpropInput_const_valid(self):
         input_sizes_val_ = np.array([1, 12, 12, 3], dtype=np.int32)
@@ -3258,6 +3348,16 @@ class BackendTests(Tf2OnnxBackendTestBase):
         input_sizes_val = np.array([1, 12, 12, 3], dtype=np.int32)
         filters_val = np.random.randint(low=0, high=256, size=[3, 3, 3, 5]).astype(np.float32)
         out_backprop_val = np.random.randint(low=0, high=256, size=[1, 10, 10, 5]).astype(np.float32)
+        self._run_test_case(func, [_OUTPUT], {_INPUT: input_sizes_val, _INPUT1: filters_val, _INPUT2: out_backprop_val})
+
+    @check_opset_min_version(12, "Conv2DBackpropInput with strided workaround")
+    def test_Conv2DBackpropInput_strided_same(self):
+        def func(input_sizes, filters, out_backprop):
+            return conv2d_backprop_input(input_sizes, filters, out_backprop, strides=[1, 5, 10, 1], padding='SAME',
+                                         name=_TFOUTPUT)
+        input_sizes_val = np.array([1, 10, 10, 3], dtype=np.int32)
+        filters_val = np.random.randint(low=0, high=256, size=[3, 3, 3, 5]).astype(np.float32)
+        out_backprop_val = np.random.randint(low=0, high=256, size=[1, 2, 1, 5]).astype(np.float32)
         self._run_test_case(func, [_OUTPUT], {_INPUT: input_sizes_val, _INPUT1: filters_val, _INPUT2: out_backprop_val})
 
     @check_opset_min_version(10, "Conv3DBackpropInputV2")
@@ -3326,8 +3426,18 @@ class BackendTests(Tf2OnnxBackendTestBase):
         self._run_test_case(func, [_OUTPUT], {_INPUT: value_val, _INPUT1: filters_val, _INPUT2: output_shape_val},
                             rtol=1e-6)
 
+    @check_opset_min_version(12, "Conv3DBackpropInputV2 with strided workaround")
+    def test_Conv3DBackpropInputV2_strided_same(self):
+        def func(value, filters, output_shape):
+            return conv3d_transpose(value, filters, output_shape, strides=[1, 10, 4, 3, 1],
+                                    padding='SAME', data_format="NDHWC", name=_TFOUTPUT)
+        filters_val = np.random.randint(low=1, high=256, size=[1, 1, 1, 1, 1]).astype(np.float32)
+        value_val = np.random.randint(low=1, high=256, size=[1, 3, 2, 5, 1]).astype(np.float32)
+        output_shape_val = np.array([1, 30, 8, 15, 1], dtype=np.int32)
+        self._run_test_case(func, [_OUTPUT], {_INPUT: value_val, _INPUT1: filters_val, _INPUT2: output_shape_val},
+                            rtol=1e-6)
+
     @check_opset_min_version(8, "CategoryMapper")
-    @skip_tf2()
     def test_hashtable_lookup(self):
         filnm = "vocab.tmp"
         words = ["apple", "pear", "banana", "cherry", "grape"]
@@ -3340,7 +3450,7 @@ class BackendTests(Tf2OnnxBackendTestBase):
             lookup_results = hash_table.lookup(query_holder)
             ret = tf.add(lookup_results, 0, name=_TFOUTPUT)
             return ret
-        self._run_test_case(func, [_OUTPUT], {_INPUT: query}, constant_fold=False)
+        self._run_test_case(func, [_OUTPUT], {_INPUT: query}, constant_fold=False, as_session=True)
         os.remove(filnm)
 
     @check_opset_min_version(11)

@@ -111,7 +111,9 @@ class Node(object):
             return a
         if np.product(a.t.dims) > external_tensor_storage.external_tensor_size_threshold:
             a = copy.copy(a)
-            tensor_name = self.name + "_" + str(external_tensor_storage.name_counter)
+            tensor_name = self.name.strip() + "_" + str(external_tensor_storage.name_counter)
+            for c in '~"#%&*:<>?/\\{|}':
+                tensor_name = tensor_name.replace(c, '_')
             external_tensor_storage.name_counter += 1
             external_tensor_storage.name_to_tensor_data[tensor_name] = a.t.raw_data
             external_tensor_storage.node_to_modified_value_attr[self] = a
@@ -382,7 +384,8 @@ class Node(object):
         attr_graphs = self.get_body_graphs()
         if attr_graphs:
             for attr_name, sub_graph in attr_graphs.items():
-                graph_proto = sub_graph.make_graph("graph for " + self.name + " " + attr_name, external_tensor_storage)
+                graph_proto = sub_graph.make_graph("graph for " + self.name + " " + attr_name,
+                                                   external_tensor_storage=external_tensor_storage)
                 self.set_attr(attr_name, graph_proto)
 
         attr = list(self.get_onnx_attrs(external_tensor_storage).values())
@@ -487,6 +490,9 @@ class Graph(object):
             # add identity node after each output, in case it is renamed during conversion.
             for o in self.outputs:
                 n = self.get_node_by_output_in_current_graph(o)
+                if n.is_graph_input():
+                    # Don't add identity if the node is also an input. We want to keep input names the same.
+                    continue
                 new_output_name = port_name(n.name + "_" + utils.make_name("raw_output_"))
                 n_shapes = n.output_shapes
                 n_dtypes = n.output_dtypes

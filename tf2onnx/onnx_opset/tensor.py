@@ -539,6 +539,14 @@ class ScatterND:
         ctx.replace_inputs(node, [node.input[2], node.input[0], node.input[1]])
 
 
+@tf_op("TensorScatterUpdate", onnx_op="ScatterND")
+class TensorScatterUpdate:
+    @classmethod
+    def version_11(cls, ctx, node, **kwargs):
+        if ctx.get_dtype(node.input[1]) != TensorProto.INT64:
+            ctx.insert_new_node_on_input(node, "Cast", node.input[1], to=TensorProto.INT64)
+
+
 @tf_op("Split")
 class Split:
     @classmethod
@@ -1046,7 +1054,8 @@ class Pack:
         # insert Unsqueeze on each input
         for i, n in enumerate(node.inputs):
             dtype = ctx.get_dtype(node.input[i])
-            shape = ctx.get_shape(node.input[i])
+            shape = ctx.get_shape(node.input[i]).copy()
+            shape.insert(axis, 1)
             new_node = ctx.make_node("Unsqueeze", [node.input[i]], op_name_scope=node.name, attr={"axes": [axis]},
                                      shapes=[shape], dtypes=[dtype])
             output_name = new_node.output[0]
