@@ -1307,6 +1307,25 @@ class BackendTests(Tf2OnnxBackendTestBase):
             return tf.identity(x_, name=_TFOUTPUT)
         self._run_test_case(func, [_OUTPUT], {_INPUT: x_val})
 
+    @check_opset_min_version(9, "OneHot")
+    def test_segment_sum_data_vector(self):
+        segs_val = np.array([0, 0, 0, 1, 2, 2, 3, 3], dtype=np.int32)
+        data_val = np.array([5, 1, 7, 2, 3, 4, 1, 3], dtype=np.float32)
+        def func(data, segments):
+            x_ = tf.math.segment_sum(data, segments)
+            return tf.identity(x_, name=_TFOUTPUT)
+        self._run_test_case(func, [_OUTPUT], {_INPUT: data_val, _INPUT1: segs_val})
+
+    @check_opset_min_version(9, "OneHot")
+    def test_segment_ops_data_tensor(self):
+        for tf_op in [tf.math.segment_sum, tf.math.segment_prod, tf.math.segment_min, tf.math.segment_max]:
+            segs_val = np.array([0, 0, 0, 1, 2, 2, 3, 3], dtype=np.int32)
+            data_val = np.arange(8 * 2 * 3, dtype=np.float32).reshape([8, 2, 3])
+            def func(data, segments):
+                x_ = tf_op(data, segments)
+                return tf.identity(x_, name=_TFOUTPUT)
+            self._run_test_case(func, [_OUTPUT], {_INPUT: data_val, _INPUT1: segs_val})
+
     @check_onnxruntime_incompatibility("Sqrt")
     def test_sqrt(self):
         x_val = np.array([4.0, 16.0, 4.0, 1.6], dtype=np.float32).reshape((2, 2))
@@ -3258,6 +3277,40 @@ class BackendTests(Tf2OnnxBackendTestBase):
             # FIXME: indices in onnx are not the same as in tensorflow so don't check for now
             #self._run_test_case([_OUTPUT, _OUTPUT1], {_INPUT: x_val})
         self._run_test_case(func, [_OUTPUT], {_INPUT: x_val})
+
+    @check_opset_min_version(9, "Compress")
+    def test_dynamic_partition_both_vector(self):
+        data_val = np.array([1, 2, 3, 4, 5, 6, 7, 8], dtype=np.float32)
+        part_val = np.array([0, 0, 1, 1, 0, 2, 1, 0], dtype=np.int32)
+        def func(data, partitions):
+            p1, p2, p3 = tf.dynamic_partition(data, partitions, num_partitions=3)
+            p1_ = tf.identity(p1, name=_TFOUTPUT)
+            p2_ = tf.identity(p2, name=_TFOUTPUT1)
+            p3_ = tf.identity(p3, name=_TFOUTPUT2)
+            return p1_, p2_, p3_
+        self._run_test_case(func, [_OUTPUT, _OUTPUT1, _OUTPUT2], {_INPUT: data_val, _INPUT1: part_val})
+
+    @check_opset_min_version(9, "Compress")
+    def test_dynamic_partition_data_tensor(self):
+        data_val = np.array([[1, 2], [3, 4], [5, 6], [7, 8], [9, 10]], dtype=np.float32)
+        part_val = np.array([0, 2, 1, 0, 1], dtype=np.int32)
+        def func(data, partitions):
+            p1, p2, p3 = tf.dynamic_partition(data, partitions, num_partitions=3)
+            p1_ = tf.identity(p1, name=_TFOUTPUT)
+            p2_ = tf.identity(p2, name=_TFOUTPUT1)
+            p3_ = tf.identity(p3, name=_TFOUTPUT2)
+            return p1_, p2_, p3_
+        self._run_test_case(func, [_OUTPUT, _OUTPUT1, _OUTPUT2], {_INPUT: data_val, _INPUT1: part_val})
+
+    @check_opset_min_version(11, "ScatterElements")
+    def test_dynamic_stitch_both_vector(self):
+        data_val = np.array([[5, 1, 3], [7, 2, 4]], dtype=np.float32)
+        indices_val = np.array([[0, 1, 4], [2, 3, 5]], dtype=np.int32)
+        def func(indices, data):
+            x = tf.dynamic_stitch(tf.unstack(indices), tf.unstack(data))
+            x_ = tf.identity(x, name=_TFOUTPUT)
+            return x_
+        self._run_test_case(func, [_OUTPUT], {_INPUT: indices_val, _INPUT1: data_val})
 
     @check_opset_min_version(10, "Conv2DBackpropInput")
     def test_Conv2DBackpropInput_const(self):
