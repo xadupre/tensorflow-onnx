@@ -349,6 +349,52 @@ class Slice:
         cls.version_1(ctx, node, **kwargs)
 
 
+@tf_op("Roll")
+class Roll:
+    @classmethod
+    def version_10(cls, ctx, node, **kwargs):
+        utils.make_sure(node.inputs[2].is_const(), "Can only convert Roll is axis is const")
+        axes = node.inputs[2].get_tensor_value()
+        if not isinstance(axes, list):
+            axes = [axes]
+        shifts_dtype = ctx.get_dtype(node.input[1])
+        if shifts_dtype != TensorProto.INT64:
+            shifts_casted = ctx.insert_new_node_on_input(node, "Cast", node.input[1], to=TensorProto.INT64).output[0]
+        else:
+            shifts_casted = node.input[1]
+
+        if len(axes) == 1:
+            unsqueeze_node = ctx.make_node("Unsqueeze", [shifts_casted], attr={'axes': [0]}, op_name_scope=node.name)
+            shifts_split = [unsqueeze_node.output[0]]
+        else:
+            shifts_split = ctx.make_node("Split", [shifts_casted], attr={'axis': 0},
+                                         output_count=len(axes), op_name_scope=node.name).output
+
+        zero_const = ctx.make_const(utils.make_name("zeros_const"), np.array([0], np.int64)).output[0]
+        shape_node = ctx.make_node("Shape", [node.input[0]], op_name_scope=node.name)
+
+        data = node.input[0]
+
+        for axis, shift in zip(axes, shifts_split):
+            len_along_axis = GraphBuilder(ctx).make_slice(
+                {"data": shape_node.output[0], "ends": [axis + 1], "starts": [axis]})
+            remaining_len = ctx.make_node("Sub", [len_along_axis, shift], op_name_scope=node.name).output[0]
+            axes_const = ctx.make_const(utils.make_name("axes_const"), np.array([axis], np.int64)).output[0]
+            slice_one = ctx.make_node("Slice", [data, zero_const, remaining_len, axes_const], op_name_scope=node.name)
+            slice_two = ctx.make_node("Slice", [data, remaining_len, len_along_axis, axes_const],
+                                      op_name_scope=node.name)
+            concat_node = ctx.make_node("Concat", [slice_two.output[0], slice_one.output[0]],
+                                        attr={'axis': axis}, op_name_scope=node.name)
+            data = concat_node.output[0]
+
+        ctx.replace_all_inputs(node.output[0], data)
+        ctx.remove_node(node.name)
+
+    @classmethod
+    def version_11(cls, ctx, node, **kwargs):
+        cls.version_10(ctx, node, **kwargs)
+
+
 @tf_op("Gather")
 class Gather:
     @classmethod
@@ -1778,15 +1824,182 @@ class Unique:
     def version_11(cls, ctx, node, **kwargs):
         # opset 11 supports explicitly
         dtypes = node.output_dtypes
-        if len(node.output) > 1:
+        node_name = node.name
+        node_inputs = node.input
+        node_outputs = node.output
+        ctx.remove_node(node_name)
+        new_node = ctx.make_node("Unique", node_inputs, name=node_name, output_count=3, attr={'sorted': 0})
+        ctx.replace_all_inputs(node_outputs[0], new_node.output[0])
+        ctx.replace_all_inputs(node_outputs[1], new_node.output[2])
+        if len(node_outputs) > 1:
             # cast to int64 if needed
-            if dtypes[1] != onnx_pb.TensorProto.UINT64:
-                cast_node = ctx.insert_new_node_on_output("Cast", node.output[1],
+            if dtypes[1] != onnx_pb.TensorProto.INT64:
+                cast_node = ctx.insert_new_node_on_output("Cast", new_node.output[2],
                                                           name=utils.make_name(node.name) + "_cast",
                                                           to=dtypes[1])
                 ctx.set_dtype(cast_node.output[0], dtypes[1])
-                ctx.copy_shape(node.output[1], cast_node.output[0])
-            # FIXME: the indices in onnx are not the same as in tensorflow.
+                ctx.copy_shape(new_node.output[2], cast_node.output[0])
+
+
+@tf_op("Bincount")
+class Bincount:
+    @classmethod
+    def version_11(cls, ctx, node, **kwargs):
+        # arr, size are int32
+        arr_inp, size_inp, weights_inp = node.input
+
+        arr_int64 = ctx.make_node("Cast", [arr_inp], attr={'to': TensorProto.INT64}).output[0]
+        size_int64 = ctx.make_node("Cast", [size_inp], attr={'to': TensorProto.INT64}).output[0]
+
+        weights_shape = ctx.get_shape(weights_inp)
+        res_dtype = ctx.get_dtype(weights_inp)
+        weights_is_zero = weights_shape is not None and 0 in weights_shape
+        utils.make_sure(weights_is_zero, "Non-empty weights not yet supported for bincount")
+
+        values, _, _, counts = ctx.make_node("Unique", [arr_int64], attr={'sorted': 1}, output_count=4,
+                                             op_name_scope=node.name).output
+        neg_one_const = ctx.make_const(utils.make_name("neg_one_const"), np.array(-1, np.int64)).output[0]
+        non_neg_val_locs = ctx.make_node("Greater", [values, neg_one_const]).output[0]
+        small_val_locs = ctx.make_node("Less", [values, size_int64]).output[0]
+        valid_val_locs = ctx.make_node("And", [non_neg_val_locs, small_val_locs]).output[0]
+
+        valid_values = ctx.make_node("Compress", [values, valid_val_locs], attr={'axis': 0}).output[0]
+        valid_counts = ctx.make_node("Compress", [counts, valid_val_locs], attr={'axis': 0}).output[0]
+
+        output_shape = ctx.make_node("Unsqueeze", [size_int64], attr={'axes': [0]}).output[0]
+
+        false_tensor = helper.make_tensor("value", TensorProto.INT64, dims=[1], vals=[0])
+        zeros = ctx.make_node("ConstantOfShape", [output_shape], attr={'value': false_tensor}).output[0]
+
+        result = ctx.make_node("ScatterElements", [zeros, valid_values, valid_counts], attr={'axis': 0}).output[0]
+        result_cast = result
+        if res_dtype != TensorProto.INT64:
+            result_cast = ctx.make_node("Cast", [result], attr={'to': res_dtype}).output[0]
+
+        ctx.replace_all_inputs(node.output[0], result_cast)
+        ctx.remove_node(node.name)
+
+
+@tf_op("SparseToDense")
+class SparseToDense:
+    @classmethod
+    def version_11(cls, ctx, node, **kwargs):
+        sparse_indices, out_shape, sparse_vals, default_val = node.input
+        idx_shape = ctx.get_shape(sparse_indices)
+        val_shape = ctx.get_shape(sparse_vals)
+        val_is_scalar = val_shape is not None and val_shape[0] == 1
+        idx_is_scalar = idx_shape is not None and idx_shape[0] == 1
+        utils.make_sure(not val_is_scalar or idx_is_scalar, "SparseToDense not implemented yet for scalar values")
+
+        expand_node = ctx.make_node("Expand", [default_val, out_shape])
+        node.type = "ScatterND"
+        ctx.replace_inputs(node, [expand_node.output[0], sparse_indices, sparse_vals])
+
+
+@tf_op("SparseReshape")
+class SparseReshape:
+    @classmethod
+    def version_11(cls, ctx, node, **kwargs):
+        indices_inp, shape_inp, new_shape_inp = node.input
+
+        product_curr_dims = ctx.make_node("ReduceProd", [shape_inp], attr={'axes': [0], 'keepdims': 1}).output[0]
+        product_new_dims = ctx.make_node("ReduceProd", [new_shape_inp], attr={'axes': [0], 'keepdims': 1}).output[0]
+        neg_missing_dims = ctx.make_node("Div", [product_curr_dims, product_new_dims]).output[0]
+        pos_missing_dims = ctx.make_node("Neg", [neg_missing_dims]).output[0]
+        zero_const = ctx.make_const(utils.make_name("cosnt_zero"), np.array(0, dtype=np.int64)).output[0]
+        one_const = ctx.make_const(utils.make_name("cosnt_one"), np.array(1, dtype=np.int64)).output[0]
+        unknown_dim_loc = ctx.make_node("Less", [new_shape_inp, zero_const]).output[0]
+
+        new_shape = ctx.make_node("Where", [unknown_dim_loc, pos_missing_dims, new_shape_inp]).output[0]
+
+        zero_tensor = helper.make_tensor("value", TensorProto.INT64, dims=[1], vals=[0])
+        def cum_prod_of_vector(vector):
+            shape = ctx.get_shape(vector)
+            rank = shape[0] if shape is not None else -1
+            if rank != -1:
+                lower_tri = np.tri(rank, rank, dtype=np.bool)
+                lower_triangular_bool = ctx.make_const(utils.make_name("lower_tri_const"), lower_tri).output[0]
+            else:
+                rank = ctx.make_node("Shape", [vector]).output[0]
+                rank_sq = ctx.make_node("Concat", [rank, rank], attr={'axis': 0}).output[0]
+                square_of_rank = ctx.make_node("ConstantOfShape", [rank_sq], attr={'value': zero_tensor}).output[0]
+                identity_matrix = ctx.make_node("EyeLike", [square_of_rank]).output[0]
+                lower_triangular = ctx.make_node("CumSum", [identity_matrix, zero_const]).output[0]
+                lower_triangular_bool = ctx.make_node("Cast", [lower_triangular],
+                                                      attr={'to': TensorProto.BOOL}).output[0]
+            terms = ctx.make_node("Where", [lower_triangular_bool, one_const, vector]).output[0]
+            return ctx.make_node("ReduceProd", [terms], attr={'axes': [1], 'keepdims': 0}).output[0]
+
+        cum_prod_curr_shape = cum_prod_of_vector(shape_inp)
+        cum_prod_new_shape = cum_prod_of_vector(new_shape)
+        cum_prod_new_concat = ctx.make_node("Concat", [product_curr_dims, cum_prod_new_shape],
+                                            attr={'axis': 0}).output[0]
+        pads = ctx.make_const(utils.make_name("pad_const"), np.array([0, -1], dtype=np.int64)).output[0]
+        cum_prod_new_inc = ctx.make_node("Pad", [cum_prod_new_concat, pads]).output[0]
+
+        flat_indices = ctx.make_node("MatMul", [indices_inp, cum_prod_curr_shape]).output[0]
+        indices_unsqueeze = ctx.make_node("Unsqueeze", [flat_indices], attr={'axes': [1]}).output[0]
+        mod_indices = ctx.make_node("Mod", [indices_unsqueeze, cum_prod_new_inc], op_name_scope=node.name).output[0]
+        new_indices = ctx.make_node("Div", [mod_indices, cum_prod_new_shape], op_name_scope=node.name).output[0]
+
+        ctx.replace_all_inputs(node.output[0], new_indices)
+        ctx.replace_all_inputs(node.output[1], new_shape)
+        ctx.remove_node(node.name)
+
+
+@tf_op("SparseFillEmptyRows")
+class SparseFillEmptyRows:
+    @classmethod
+    def version_11(cls, ctx, node, **kwargs):
+        sparse_indices, sparse_vals, dense_shape, default_val = node.input
+        utils.make_sure(len(ctx.find_output_consumers(node.output[3])) == 0,
+                        "reverse_index_map output of SparseFillEmptyRows not implemented")
+        axis_0_indices = GraphBuilder(ctx).make_slice({"data": sparse_indices, "ends": [1], "starts": [0], "axes": [1]})
+        unique_indices = ctx.make_node("Unique", [axis_0_indices], op_name_scope=node.name).output[0]
+        axis_0_len = GraphBuilder(ctx).make_slice({"data": dense_shape, "ends": [1], "starts": [0], "axes": [0]})
+
+        true_tensor = helper.make_tensor("value", TensorProto.BOOL, dims=[1], vals=[True])
+        true_of_shape = ctx.make_node("ConstantOfShape", inputs=[axis_0_len], attr={"value": true_tensor},
+                                      op_name_scope=node.name).output[0]
+        unique_shape = ctx.make_node("Shape", [unique_indices], op_name_scope=node.name).output[0]
+        false_tensor = helper.make_tensor("value", TensorProto.BOOL, dims=[1], vals=[False])
+        false_of_shape = ctx.make_node("ConstantOfShape", inputs=[unique_shape], attr={"value": false_tensor},
+                                       op_name_scope=node.name).output[0]
+
+        indicators = ctx.make_node("ScatterElements", [true_of_shape, unique_indices, false_of_shape],
+                                   op_name_scope=node.name).output[0]
+        zero_const = ctx.make_const(utils.make_name("zero_const"), np.array(0, dtype=np.int64)).output[0]
+        one_const = ctx.make_const(utils.make_name("one_const"), np.array(1, dtype=np.int64)).output[0]
+        scalar_len = ctx.make_node("Squeeze", [axis_0_len], attr={"axes": [0]}, op_name_scope=node.name).output[0]
+        idx_range = ctx.make_node("Range", [zero_const, scalar_len, one_const], op_name_scope=node.name).output[0]
+        new_indices = ctx.make_node("Compress", [idx_range, indicators], op_name_scope=node.name).output[0]
+        new_indices_unsqueeze = ctx.make_node("Unsqueeze", [new_indices], attr={"axes": [1]},
+                                              op_name_scope=node.name).output[0]
+
+        num_empty_rows = ctx.make_node("Shape", [new_indices], op_name_scope=node.name).output[0]
+        new_values = ctx.make_node("Expand", [default_val, num_empty_rows], op_name_scope=node.name).output[0]
+        indices_shape = ctx.make_node("Shape", [sparse_indices], op_name_scope=node.name).output[0]
+        idx_shape = GraphBuilder(ctx).make_slice({"data": indices_shape, "ends": [2], "starts": [1], "axes": [0]})
+        idx_shape_min_1 = ctx.make_node("Sub", [idx_shape, one_const], op_name_scope=node.name).output[0]
+
+        triple_0 = ctx.make_const(utils.make_name("triple_0"), np.array([0, 0, 0], dtype=np.int64)).output[0]
+        new_indices_pads = ctx.make_node("Concat", [triple_0, idx_shape_min_1], attr={"axis": 0},
+                                         op_name_scope=node.name).output[0]
+        new_indices_2d = ctx.make_node("Pad", [new_indices_unsqueeze, new_indices_pads],
+                                       op_name_scope=node.name).output[0]
+
+        combined_indices = ctx.make_node("Concat", [sparse_indices, new_indices_2d], attr={"axis": 0},
+                                         op_name_scope=node.name).output[0]
+        combined_vals = ctx.make_node("Concat", [sparse_vals, new_values], attr={"axis": 0},
+                                      op_name_scope=node.name).output[0]
+
+        # The indices will not be sorted (violates a TF requirement), but conversions for subsequent ops
+        # (like SparseToDense) don't care and will work fine.  Add a TopK to sort in the future if needed.
+        ctx.replace_all_inputs(node.output[0], combined_indices)
+        ctx.replace_all_inputs(node.output[1], combined_vals)
+        ctx.replace_all_inputs(node.output[2], indicators)
+
+        ctx.remove_node(node.name)
 
 
 @tf_op("DynamicPartition")
@@ -1827,9 +2040,9 @@ class DynamicStitch:
         index_shapes = [ctx.get_shape(inp) for inp in index_inputs]
         data_shapes = [ctx.get_shape(inp) for inp in data_inputs]
         utils.make_sure(all(s is not None and len(s) == 1 for s in index_shapes),
-                        "DynamicPartition only implemented for index tensors of rank 1")
-        utils.make_sure(all(s is not None and len(s) == 1 for s in data_shapes),
-                        "DynamicPartition only implemented for data tensors of rank 1")
+                        "DynamicStitch only implemented for index tensors of rank 1")
+        utils.make_sure(all(s is not None for s in data_shapes), "DynamicStitch requires data tensors of known rank")
+        data_rank = len(data_shapes[0])
         dtype = ctx.get_dtype(node.output[0])
         concat_indices = ctx.make_node("Concat", index_inputs, attr={'axis': 0})
         concat_indices_int64 = ctx.make_node("Cast", [concat_indices.output[0]], attr={"to": TensorProto.INT64})
@@ -1837,14 +2050,15 @@ class DynamicStitch:
         concat_data = ctx.make_node("Concat", data_inputs, attr={'axis': 0})
 
         data_shape = ctx.make_node("Shape", [concat_data.output[0]])
-        expanded_indices = ctx.make_node("Expand", [concat_indices_int64.output[0], data_shape.output[0]])
-
-        max_index = ctx.make_node("ReduceMax", [concat_indices_int64.output[0]], attr={'axes': [0], 'keepdims': 1})
-        const_one = ctx.make_const(utils.make_name('const_one'), np.array([1], np.int64))
-        target_length = ctx.make_node("Add", [max_index.output[0], const_one.output[0]])
+        unsqueezed_indices = concat_indices_int64
+        if data_rank > 1:
+            unsqueeze_axes = list(range(1, data_rank))
+            unsqueezed_indices = ctx.make_node("Unsqueeze", [concat_indices_int64.output[0]],
+                                               attr={'axes': unsqueeze_axes})
+        expanded_indices = ctx.make_node("Expand", [unsqueezed_indices.output[0], data_shape.output[0]])
 
         zero_tensor = helper.make_tensor("value", dtype, dims=[1], vals=[0])
-        zeros_of_shape = ctx.make_node("ConstantOfShape", [target_length.output[0]], attr={"value": zero_tensor})
+        zeros_of_shape = ctx.make_node("ConstantOfShape", [data_shape.output[0]], attr={"value": zero_tensor})
 
         name = node.name
         outputs = node.output

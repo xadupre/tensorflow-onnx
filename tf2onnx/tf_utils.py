@@ -15,7 +15,7 @@ from distutils.version import LooseVersion
 import numpy as np
 import tensorflow as tf
 
-from tensorflow.core.framework import types_pb2, tensor_pb2
+from tensorflow.core.framework import types_pb2, tensor_pb2, graph_pb2
 from tensorflow.python.framework import tensor_util
 
 from onnx import helper, onnx_pb, numpy_helper
@@ -56,10 +56,11 @@ def tf_to_onnx_tensor(tensor, name=""):
         # assume np_data is string, numpy_helper.from_array accepts ndarray,
         # in which each item is of str while the whole dtype is of object.
         try:
-            if len(np_data.shape) > 0:
-                np_data = np_data.astype(np.str).astype(np.object)
-            else:
-                np_data = np.array(str(np_data)).astype(np.object)
+            # Faster but fails on Unicode
+            np_data = np_data.astype(np.str).astype(np.object)
+        except UnicodeDecodeError:
+            decode = np.vectorize(lambda x: x.decode('UTF-8'))
+            np_data = decode(np_data).astype(np.object)
         except:  # pylint: disable=bare-except
             raise RuntimeError("Not support type: {}".format(type(np_data.flat[0])))
     return numpy_helper.from_array(np_data, name=name)
@@ -179,6 +180,12 @@ def compute_const_folding_using_tf(g, const_node_values, graph_outputs):
     outputs_to_shapes = {}
     shape_node_outputs = {}
 
+    def is_small_shape(x):
+        return np.product(x) <= 1000
+
+    def is_huge_shape(x):
+        return np.product(x) >= 1000000
+
     for node in ops:
         # Load values of constants. Use const_node_values if possible
         if node.type in ["Const", "ConstV2"]:
@@ -230,15 +237,22 @@ def compute_const_folding_using_tf(g, const_node_values, graph_outputs):
                 g3 = tf.Graph()
                 with g3.as_default():
                     feed_dict = {}
+                    inp_shapes = []
                     for inp in input_names:
-                        feed_dict[inp] = outputs_to_values[inp]
+                        inp_np = outputs_to_values[inp]
+                        feed_dict[inp] = inp_np
+                        inp_shapes.append(inp_np.shape)
                     try:
                         with tf_session() as sess:
                             tf.import_graph_def(mini_graph_def, name='')
                             results = sess.run(output_names, feed_dict=feed_dict)
-                        outputs_to_values[output_names[0]] = results[0]
-                        outputs_to_dtypes[output_names[0]] = node.outputs[0].dtype
-                        progress = True
+                        if is_huge_shape(results[0].shape) and all(is_small_shape(inp) for inp in inp_shapes):
+                            logger.debug("Skipping folding of node %s since result shape %s is much larger "
+                                         "than input shapes %s", node.name, results[0].shape, inp_shapes)
+                        else:
+                            outputs_to_values[output_names[0]] = results[0]
+                            outputs_to_dtypes[output_names[0]] = node.outputs[0].dtype
+                            progress = True
                     except Exception:  # pylint: disable=broad-except
                         logger.debug("Could not fold node %s", node.name)
         unneeded_outputs.update(outputs_to_values.keys())
@@ -266,6 +280,43 @@ def compute_const_folding_using_tf(g, const_node_values, graph_outputs):
     logger.info("Computed %d values for constant folding", len(outputs_to_values))
     return outputs_to_values, outputs_to_dtypes
 
+def get_hash_table_info(nodes_or_graph_def):
+    """
+    Return lists of the shared_names, key_dtypes, and value_dtypes of all hash tables declared in the graph_def
+    or list of nodes
+    """
+    if isinstance(nodes_or_graph_def, graph_pb2.GraphDef):
+        nodes = nodes_or_graph_def.node
+    else:
+        nodes = nodes_or_graph_def
+    names = []
+    key_dtypes = []
+    val_dtypes = []
+    for n in nodes:
+        if n.op == "HashTableV2":
+            if all(k in n.attr for k in ['shared_name', 'key_dtype', 'value_dtype']):
+                name = n.attr['shared_name'].s
+                if name != b'':
+                    names.append(name)
+                    key_dtypes.append(n.attr['key_dtype'].type)
+                    val_dtypes.append(n.attr['value_dtype'].type)
+    return names, key_dtypes, val_dtypes
+
+def replace_placeholders_with_tables(graph_def, placeholder_to_table_info):
+    """
+    Given a graph_def and a map from placeholder names to a tuple of table names, key dtypes, and value dtypes,
+    Replaces placeholder ops in the graph_def with HashTableV2 ops
+    """
+    for n in graph_def.node:
+        if n.op == "Placeholder" and n.name in placeholder_to_table_info:
+            name, key_dtype, val_dtype = placeholder_to_table_info[n.name]
+            for a in list(n.attr):
+                del n.attr[a]
+            n.op = "HashTableV2"
+            n.attr['shared_name'].s = name
+            n.attr['key_dtype'].type = key_dtype
+            n.attr['value_dtype'].type = val_dtype
+
 def tflist_to_onnx(g, shape_override, const_node_values=None):
     """
     Convert the tf-node list into an onnx graph with minimal rewrites so
@@ -280,7 +331,7 @@ def tflist_to_onnx(g, shape_override, const_node_values=None):
                     "T_threshold", "element_dtype", "shape_type", "_lower_using_switch_merge",
                     "parallel_iterations", "_num_original_outputs", "output_types", "output_shapes",
                     "key_dtype", "value_dtype", "Tin", "Tout", "capacity", "component_types", "shapes",
-                    "Toutput_types", "dense_shapes", "Tdense",
+                    "Toutput_types", "dense_shapes", "Tdense", "Tsegmentids", "Tshift", "Tnumsegments", "SrcT",
                     "Tcomplex", "Treal",  # For RFFT, Tcomplex is ignored because
                                           # onnx.helper.make_node fails,
                                           # TODO: it should be added back.
@@ -315,43 +366,32 @@ def tflist_to_onnx(g, shape_override, const_node_values=None):
         op_cnt[node.type] += 1
         for a in node.node_def.attr:
             attr_cnt[a] += 1
-            if a == "dtype":
-                attr[a] = map_tf_dtype(get_tf_node_attr(node, "dtype"))
+            value = get_tf_node_attr(node, a)
+            if a in ignored_attr:
+                pass
             elif a == "T":
-                dtype = get_tf_node_attr(node, a)
-                if dtype and not isinstance(dtype, list):
-                    dtypes[node.name] = map_tf_dtype(dtype)
-            elif a in {"output_type", "output_dtype", "out_type", "Tidx", "out_idx", "out_type", "internal_type",
-                       "Tsegmentids"}:
-                # Tidx is used by Range
-                # out_idx is used by ListDiff
-                attr[a] = map_tf_dtype(get_tf_node_attr(node, a))
-            elif a == "sparse_types":
-                attr[a] = [map_tf_dtype(d) for d in get_tf_node_attr(node, a)]
+                if value and not isinstance(value, list):
+                    dtypes[node.name] = map_tf_dtype(value)
             elif a == "shape":
                 shape = get_tf_shape_attr(node)
                 if shape is not None:
                     attr[a] = shape
-            elif a == "output_shapes":
-                # we should not need it since we pull the shapes above already
-                pass
             elif a in {"body", "cond", "then_branch", "else_branch", "f"}:
                 input_shapes = [inp.get_shape() for inp in node.inputs]
                 nattr = get_tf_node_attr(node, a)
                 attr[a] = nattr.name
                 functions[nattr.name] = input_shapes
-            elif a == "value":
-                tensor = get_tf_node_attr(node, a)
-                if const_node_values and node.name in const_node_values:
-                    tensor.tensor_content = const_node_values[node.name]
-                onnx_tensor = tf_to_onnx_tensor(tensor, name=port_name(node.name))
-                attr[a] = onnx_tensor
             elif a == "DstT":
-                attr["to"] = map_tf_dtype(get_tf_node_attr(node, "DstT"))
-            elif a == "SrcT":
-                continue
-            elif a in ignored_attr:
-                continue
+                attr["to"] = map_tf_dtype(value)
+            elif isinstance(value, tensor_pb2.TensorProto):
+                if const_node_values and node.name in const_node_values:
+                    value.tensor_content = const_node_values[node.name]
+                onnx_tensor = tf_to_onnx_tensor(value, name=port_name(node.name))
+                attr[a] = onnx_tensor
+            elif isinstance(value, tf.DType):
+                attr[a] = map_tf_dtype(value)
+            elif isinstance(value, list) and len(value) > 0 and isinstance(value[0], tf.DType):
+                attr[a] = [map_tf_dtype(v) for v in value]
             else:
                 attr[a] = get_tf_node_attr(node, a)
 

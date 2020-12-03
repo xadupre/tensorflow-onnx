@@ -821,6 +821,26 @@ class BackendTests(Tf2OnnxBackendTestBase):
             return tf.identity(x_, name=_TFOUTPUT)
         self._run_test_case(func, [_OUTPUT], {_INPUT: x_val})
 
+    @check_opset_min_version(10, "Slice")
+    def test_roll_axis_scalar(self):
+        x_val = np.arange(4 * 3 * 5 * 2, dtype=np.float32).reshape((4, 3, 5, 2))
+        shift_val = np.array(4, dtype=np.int64)
+        axes_val = np.array(2, dtype=np.int32)
+        def func(x, shift):
+            x_ = tf.roll(x, shift, axes_val)
+            return tf.identity(x_, name=_TFOUTPUT)
+        self._run_test_case(func, [_OUTPUT], {_INPUT: x_val, _INPUT1: shift_val})
+
+    @check_opset_min_version(10, "Slice")
+    def test_roll_axis_vector(self):
+        x_val = np.arange(4 * 3 * 5 * 2, dtype=np.float32).reshape((4, 3, 5, 2))
+        shift_val = np.array([2, 3, 4], dtype=np.int32)
+        axes_val = np.array([1, 2, 1], dtype=np.int32)
+        def func(x, shift):
+            x_ = tf.roll(x, shift, axes_val)
+            return tf.identity(x_, name=_TFOUTPUT)
+        self._run_test_case(func, [_OUTPUT], {_INPUT: x_val, _INPUT1: shift_val})
+
     @check_tf_min_version("2.2")
     def test_large_model_format(self):
         x_val = np.array([2.0], dtype=np.float32)
@@ -872,6 +892,26 @@ class BackendTests(Tf2OnnxBackendTestBase):
             x_ = tf.tile(x, multiple)
             return tf.identity(x_, name=_TFOUTPUT)
         self._run_test_case(func, [_OUTPUT], {_INPUT: x_val})
+
+    @check_opset_min_version(7, "tile")
+    def test_tile_const(self):
+        # Should be folded
+        x_val = np.array([[0, 1], [2, 3]], dtype=np.float32)
+        def func():
+            multiple = tf.constant([1000, 2])
+            x_ = tf.tile(tf.constant(x_val), multiple)
+            return tf.identity(x_, name=_TFOUTPUT)
+        self._run_test_case(func, [_OUTPUT], {}, graph_validator=lambda g: check_op_count(g, "Tile", 0, disabled=False))
+
+    @check_opset_min_version(7, "tile")
+    def test_tile_large_const(self):
+        # Should not be folded since it is so large
+        x_val = np.array([[0, 1], [2, 3]], dtype=np.float32)
+        def func():
+            multiple = tf.constant([1000000, 2])
+            x_ = tf.tile(tf.constant(x_val), multiple)
+            return tf.identity(x_, name=_TFOUTPUT)
+        self._run_test_case(func, [_OUTPUT], {}, graph_validator=lambda g: check_op_count(g, "Tile", 1, disabled=False))
 
     @check_onnxruntime_incompatibility("Neg")
     def test_neg(self):
@@ -1316,6 +1356,21 @@ class BackendTests(Tf2OnnxBackendTestBase):
             return tf.identity(x_, name=_TFOUTPUT)
         self._run_test_case(func, [_OUTPUT], {_INPUT: data_val, _INPUT1: segs_val})
 
+    @check_opset_min_version(11, "Pad")
+    def test_segment_sum_unknown_rank(self):
+        segs_val = np.array([0, 0, 0, 1, 2, 2, 3, 3], dtype=np.int32)
+        data_val = np.arange(8 * 2 * 3, dtype=np.float32).reshape([8, 2, 3])
+        data_shape_val = np.array([8, 2, 3, 1], dtype=np.int64)
+        shape_pad_val = np.zeros((1, 2), dtype=np.int64)
+        def func(data, segments, data_shape, shape_pad):
+            # Some hackery to make the rank unknown
+            data_shape_ = tf.pad(data_shape, shape_pad, constant_values=0)
+            data = tf.reshape(data, data_shape_)
+            x_ = tf.math.segment_sum(data, segments)
+            return tf.identity(x_, name=_TFOUTPUT)
+        self._run_test_case(func, [_OUTPUT],
+                            {_INPUT: data_val, _INPUT1: segs_val, _INPUT2: data_shape_val, _INPUT3: shape_pad_val})
+
     @check_opset_min_version(9, "OneHot")
     def test_segment_ops_data_tensor(self):
         for tf_op in [tf.math.segment_sum, tf.math.segment_prod, tf.math.segment_min, tf.math.segment_max]:
@@ -1325,6 +1380,94 @@ class BackendTests(Tf2OnnxBackendTestBase):
                 x_ = tf_op(data, segments)
                 return tf.identity(x_, name=_TFOUTPUT)
             self._run_test_case(func, [_OUTPUT], {_INPUT: data_val, _INPUT1: segs_val})
+
+    @check_opset_min_version(11, "Pad")
+    def test_segment_mean_unknown_rank(self):
+        segs_val = np.array([0, 0, 0, 1, 2, 2, 3, 3], dtype=np.int32)
+        data_val = np.arange(8 * 2 * 3, dtype=np.float32).reshape([8, 2, 3])
+        data_shape_val = np.array([8, 2, 3, 1], dtype=np.int64)
+        shape_pad_val = np.zeros((1, 2), dtype=np.int64)
+        def func(data, segments, data_shape, shape_pad):
+            # Some hackery to make the rank unknown
+            data_shape_ = tf.pad(data_shape, shape_pad, constant_values=0)
+            data = tf.reshape(data, data_shape_)
+            x_ = tf.math.segment_mean(data, segments)
+            return tf.identity(x_, name=_TFOUTPUT)
+        self._run_test_case(func, [_OUTPUT],
+                            {_INPUT: data_val, _INPUT1: segs_val, _INPUT2: data_shape_val, _INPUT3: shape_pad_val})
+
+    @check_opset_min_version(9, "OneHot")
+    def test_sparse_segment_sum(self):
+        data_val = np.arange(8 * 2 * 3, dtype=np.float32).reshape([8, 2, 3])
+        indices_val = np.array([2, 0, 1, 3, 5, 4, 3, 5, 5], dtype=np.int32)
+        segs_val = np.array([0, 0, 0, 1, 2, 2, 3, 3, 3], dtype=np.int32)
+        def func(data, indices, segments):
+            x_ = tf.sparse.segment_sum(data, indices, segments)
+            return tf.identity(x_, name=_TFOUTPUT)
+        self._run_test_case(func, [_OUTPUT], {_INPUT: data_val, _INPUT1: indices_val, _INPUT2: segs_val})
+
+    @check_opset_min_version(9, "OneHot")
+    def test_sparse_segment_mean(self):
+        data_val = np.arange(8 * 2 * 3, dtype=np.float32).reshape([8, 2, 3])
+        indices_val = np.array([2, 0, 1, 3, 5, 4, 3, 5, 5], dtype=np.int32)
+        segs_val = np.array([0, 0, 0, 1, 2, 2, 3, 3, 3], dtype=np.int32)
+        def func(data, indices, segments):
+            x_ = tf.sparse.segment_mean(data, indices, segments)
+            return tf.identity(x_, name=_TFOUTPUT)
+        self._run_test_case(func, [_OUTPUT], {_INPUT: data_val, _INPUT1: indices_val, _INPUT2: segs_val})
+
+    @check_opset_min_version(9, "OneHot")
+    def test_sparse_segment_sqrtn(self):
+        data_val = np.arange(8 * 2 * 3, dtype=np.float32).reshape([8, 2, 3])
+        indices_val = np.array([2, 0, 1, 3, 5, 4, 3, 5, 5], dtype=np.int32)
+        segs_val = np.array([0, 0, 0, 1, 2, 2, 3, 3, 3], dtype=np.int32)
+        def func(data, indices, segments):
+            x_ = tf.sparse.segment_sqrt_n(data, indices, segments)
+            return tf.identity(x_, name=_TFOUTPUT)
+        self._run_test_case(func, [_OUTPUT], {_INPUT: data_val, _INPUT1: indices_val, _INPUT2: segs_val})
+
+    @check_opset_min_version(9, "OneHot")
+    def test_sparse_segment_ops_with_num_segments(self):
+        for tf_op in [tf.sparse.segment_sum, tf.sparse.segment_mean, tf.sparse.segment_sqrt_n]:
+            data_val = np.arange(8 * 2 * 3, dtype=np.float32).reshape([8, 2, 3])
+            indices_val = np.array([2, 0, 1, 3, 5, 4, 3, 5, 5], dtype=np.int32)
+            segs_val = np.array([0, 0, 0, 1, 3, 3, 4, 4, 4], dtype=np.int32)
+            def func(data, indices, segments):
+                x_ = tf_op(data, indices, segments, num_segments=6)
+                return tf.identity(x_, name=_TFOUTPUT)
+            self._run_test_case(func, [_OUTPUT], {_INPUT: data_val, _INPUT1: indices_val, _INPUT2: segs_val})
+
+    @check_opset_min_version(9, "OneHot")
+    def test_unsorted_segment_ops(self):
+        tf_ops = [
+            tf.math.unsorted_segment_max,
+            tf.math.unsorted_segment_min,
+            tf.math.unsorted_segment_sum,
+            tf.math.unsorted_segment_prod,
+            tf.math.unsorted_segment_mean,
+            tf.math.unsorted_segment_sqrt_n,
+        ]
+        for tf_op in tf_ops:
+            segs_val = np.array([1, 3, 0, 1, 2, 4, 2, 1], dtype=np.int32)
+            data_val = np.arange(8 * 2 * 3, dtype=np.float32).reshape([8, 2, 3])
+            def func(data, segments):
+                x_ = tf_op(data, segments, num_segments=5)
+                return tf.identity(x_, name=_TFOUTPUT)
+            self._run_test_case(func, [_OUTPUT], {_INPUT: data_val, _INPUT1: segs_val})
+
+    @check_opset_min_version(9, "OneHot")
+    @check_tf_min_version("2.3", "num_segments can be int64 in tf 2.3")
+    def test_segment_op_types(self):
+        data_dtypes = [np.int32, np.float32]
+        seg_dtypes = [np.int32, np.int64]
+        for dtypes in product(data_dtypes, seg_dtypes, seg_dtypes, seg_dtypes):
+            data_val = np.arange(8 * 2 * 3, dtype=dtypes[0]).reshape([8, 2, 3])
+            indices_val = np.array([2, 0, 1, 3, 5, 4, 3, 5, 5], dtype=dtypes[1])
+            segs_val = np.array([0, 0, 0, 1, 3, 3, 4, 4, 4], dtype=dtypes[2])
+            def func(data, indices, segments):
+                x_ = tf.sparse.segment_sum(data, indices, segments, num_segments=np.array(6, dtype=dtypes[3]))
+                return tf.identity(x_, name=_TFOUTPUT)
+            self._run_test_case(func, [_OUTPUT], {_INPUT: data_val, _INPUT1: indices_val, _INPUT2: segs_val})
 
     @check_onnxruntime_incompatibility("Sqrt")
     def test_sqrt(self):
@@ -2386,7 +2529,7 @@ class BackendTests(Tf2OnnxBackendTestBase):
             return tf.identity(x_, name=_TFOUTPUT)
         self._run_test_case(func, [_OUTPUT], {_INPUT: x_val})
 
-    @check_opset_min_version(8, "where")
+    @check_opset_min_version(7, "GreaterEqual")
     def test_where(self):
         x_val = np.array([1, 2, -3, 4, -5, -6, -7, 8, 9, 0], dtype=np.float32)
         true_result = np.array([111, 222, 333, 444, 555, 666, 777, 888, 999, 1000],
@@ -2406,8 +2549,20 @@ class BackendTests(Tf2OnnxBackendTestBase):
             return tf.identity(picks, name=_TFOUTPUT)
         self._run_test_case(func, [_OUTPUT], {_INPUT: x_val})
 
-    @check_opset_min_version(8, "where")
-    @check_target("rs6", "onnxruntime Where type limitation")
+    @check_opset_min_version(9, "Where for strings needs opset 9")
+    def test_where_string(self):
+        x_val = np.array([1, 2, -3, 4, -5, -6, -7, 8, 9, 0], dtype=np.float32)
+        true_result = np.array([111, 222, 333, 444, 555, 666, 777, 888, 999, 1000],
+                               dtype=np.str)
+        false_result = np.array([-111, -222, -333, -444, -555, -666, -777, -888, -999, -1000],
+                                dtype=np.str)
+        def func(x):
+            picks = tf.where(x > -1, true_result, false_result)
+            return tf.identity(picks, name=_TFOUTPUT)
+        self._run_test_case(func, [_OUTPUT], {_INPUT: x_val})
+
+    @check_opset_min_version(7, "GreaterEqual")
+    #@check_target("rs6", "onnxruntime Where type limitation")
     def test_where_int32(self):
         x_val = np.array([1, 2, -3, 4, -5, -6, -7, 8, 9, 0], dtype=np.int32)
         true_result = np.array([111, 222, 333, 444, 555, 666, 777, 888, 999, 1000],
@@ -2419,7 +2574,7 @@ class BackendTests(Tf2OnnxBackendTestBase):
             return tf.identity(picks, name=_TFOUTPUT)
         self._run_test_case(func, [_OUTPUT], {_INPUT: x_val})
 
-    @check_opset_min_version(8, "where")
+    @check_opset_min_version(7, "GreaterEqual")
     @check_tf_max_version("1.15", "issues in tf-2.0, fix later")
     def test_where_with_two_rank_input(self):
         x_val = np.array([1, 2, -3, 4, -5, -6, -7, 8, 9, 0], dtype=np.float32)
@@ -2435,7 +2590,7 @@ class BackendTests(Tf2OnnxBackendTestBase):
             return tf.identity(picks, name=_TFOUTPUT)
         self._run_test_case(func, [_OUTPUT], {_INPUT: x_val})
 
-    @check_opset_min_version(8, "where")
+    @check_opset_min_version(7, "GreaterEqual")
     def test_where_with_two_rank_condition(self):
         x_val = np.array([[1, 2, -3, 4, -5, -6, -7, 8, 9, 0]], dtype=np.float32)
         true_result = np.array([[111, 222, 333, 444, 555, 666, 777, 888, 999, 1000]],
@@ -2447,7 +2602,7 @@ class BackendTests(Tf2OnnxBackendTestBase):
             return tf.identity(picks, name=_TFOUTPUT)
         self._run_test_case(func, [_OUTPUT], {_INPUT: x_val})
 
-    @check_opset_min_version(8, "where")
+    @check_opset_min_version(7, "GreaterEqual")
     def test_where_with_three_rank_condition(self):
         x_val = np.array([[[1, 2, -3, 4, -5, -6, -7, 8, 9, 0]]], dtype=np.float32)
         true_result = np.array([[[111, 222, 333, 444, 555, 666, 777, 888, 999, 1000]]],
@@ -2460,7 +2615,7 @@ class BackendTests(Tf2OnnxBackendTestBase):
 
         self._run_test_case(func, [_OUTPUT], {_INPUT: x_val})
 
-    @check_opset_min_version(8, "where")
+    @check_opset_min_version(7, "GreaterEqual")
     def test_where_scalar(self):
         x_val = np.array(6, dtype=np.float32)
         true_result = np.array([111, 222, 333, 444, 555, 666, 777, 888, 999, 1000],
@@ -2473,7 +2628,7 @@ class BackendTests(Tf2OnnxBackendTestBase):
         self._run_test_case(func, [_OUTPUT], {_INPUT: x_val})
 
     @check_opset_min_version(9, "NonZero")
-    @check_target("rs6", "onnxruntime Transpose type limitation")
+    #@check_target("rs6", "onnxruntime Transpose type limitation")
     def test_where_with_cond_only(self):
         for np_type in [np.int32, np.float32]:
             x_val = np.random.randint(0, 2, size=[10, 20, 30]).astype(np_type)
@@ -3230,6 +3385,31 @@ class BackendTests(Tf2OnnxBackendTestBase):
             return tf.identity(x_, name=_TFOUTPUT)
         self._run_test_case(func, [_OUTPUT], {_INPUT: x_val, _INPUT1: y_val, _INPUT2: z_val})
 
+    @check_tf_min_version("1.15", "tensor_scatter_nd_update for strings needs tf 1.15")
+    @check_opset_min_version(11, "ScatterND")
+    def test_tensor_scatter_update_str(self):
+        x_val = np.array(['A', '♠♣♥♦', 'B', 'C'], dtype=np.str).reshape((4))
+        y_val = np.array([0, 2], dtype=np.int64).reshape((2, 1))
+        z_val = np.array(['☺', '11'], dtype=np.str).reshape((2))
+
+        def func(x, y, z):
+            x_ = tf.tensor_scatter_nd_update(x, y, z)
+            return tf.identity(x_, name=_TFOUTPUT)
+        self._run_test_case(func, [_OUTPUT], {_INPUT: x_val, _INPUT1: y_val, _INPUT2: z_val})
+
+    @check_tf_min_version("1.15", "tensor_scatter_nd_update for strings needs tf 1.15")
+    @check_opset_min_version(11, "ScatterND")
+    def test_tensor_scatter_update_str_const(self):
+        x_val = np.array(['A', '♠♣♥♦', 'B', 'C'], dtype=np.str).reshape((4))
+        y_val = np.array([0, 2], dtype=np.int64).reshape((2, 1))
+        z_val = np.array(['☺', '11'], dtype=np.str).reshape((2))
+
+        def func(x, y):
+            z = tf.constant(z_val)
+            x_ = tf.tensor_scatter_nd_update(x, y, z)
+            return tf.identity(x_, name=_TFOUTPUT)
+        self._run_test_case(func, [_OUTPUT], {_INPUT: x_val, _INPUT1: y_val})
+
     @check_tf_min_version("1.14", "tensor_scatter_nd_update needs tf 1.14")
     @check_opset_min_version(11, "ScatterND")
     def test_tensor_scatter_update_cast_indices(self):
@@ -3269,14 +3449,106 @@ class BackendTests(Tf2OnnxBackendTestBase):
 
     @check_opset_min_version(11, "Unique")
     def test_unique(self):
-        x_val = np.array([1, 1, 2, 4, 4, 4, 7, 8, 8], dtype=np.float32)
+        x_val = np.array([1, 2, 8, 1, 2, 2, 7, 7, 7, 1], dtype=np.float32)
         def func(x):
             x1_, _ = tf.unique(x)
             y1 = tf.identity(x1_, name=_TFOUTPUT)
             return y1
-            # FIXME: indices in onnx are not the same as in tensorflow so don't check for now
-            #self._run_test_case([_OUTPUT, _OUTPUT1], {_INPUT: x_val})
         self._run_test_case(func, [_OUTPUT], {_INPUT: x_val})
+
+    @check_opset_min_version(11, "Unique")
+    def test_unique_indices_int64(self):
+        x_val = np.array([2, 3, 3, 6, 4, 1, 1], dtype=np.float32)
+        def func(x):
+            x1_, x2_ = tf.unique(x, out_idx=tf.int64)
+            y1 = tf.identity(x1_, name=_TFOUTPUT)
+            y2 = tf.identity(x2_, name=_TFOUTPUT1)
+            return y1, y2
+        self._run_test_case(func, [_OUTPUT, _OUTPUT1], {_INPUT: x_val})
+
+    @check_opset_min_version(11, "Unique")
+    def test_unique_indices_int32(self):
+        x_val = np.array([2, 3, 3, 6, 4, 1, 1], dtype=np.float32)
+        def func(x):
+            x1_, x2_ = tf.unique(x, out_idx=tf.int32)
+            y1 = tf.identity(x1_, name=_TFOUTPUT)
+            y2 = tf.identity(x2_, name=_TFOUTPUT1)
+            return y1, y2
+        self._run_test_case(func, [_OUTPUT, _OUTPUT1], {_INPUT: x_val})
+
+    @check_opset_min_version(11, "Unique")
+    def test_bincount(self):
+        x_val = np.array([5, 2, 3, 1, 3, 2, 7, 5, 9, 10], dtype=np.int32)
+        def func(x):
+            x_ = tf.math.bincount(x)
+            y_ = tf.identity(x_, name=_TFOUTPUT)
+            return y_
+        self._run_test_case(func, [_OUTPUT], {_INPUT: x_val})
+
+    @check_opset_min_version(11, "ScatterND")
+    def test_sparse_to_dense(self):
+        i_val = np.array([[0, 0, 0], [0, 0, 2], [0, 1, 3], [1, 2, 2], [1, 2, 3]], dtype=np.int64)
+        v_val = np.array([1.5, 1.6, 1.7, 1.8, 1.9], dtype=np.float32)
+        ds_val = np.array([2, 3, 4], dtype=np.int64)
+        d_val = np.array(2.5, dtype=np.float32)
+        def func(indices, values, dense_shape, default):
+            st = tf.SparseTensor(indices, values, dense_shape)
+            dense = tf.sparse.to_dense(st, default, validate_indices=True)
+            x_ = tf.identity(dense, name=_TFOUTPUT)
+            return x_
+        self._run_test_case(func, [_OUTPUT], {_INPUT: i_val, _INPUT1: v_val, _INPUT2: ds_val, _INPUT3: d_val})
+
+    @check_opset_min_version(11, "Unique")
+    def test_sparse_fill_empty_rows(self):
+        i_val = np.array([[1, 0, 0], [1, 0, 2], [1, 1, 3], [3, 2, 2], [3, 2, 3]], dtype=np.int64)
+        v_val = np.array([1.5, 1.6, 1.7, 1.8, 1.9], dtype=np.float32)
+        ds_val = np.array([5, 3, 4], dtype=np.int64)
+        d_val = np.array(2.5, dtype=np.float32)
+        def func(indices, values, dense_shape, default):
+            st = tf.SparseTensor(indices, values, dense_shape)
+            st_, indicator = tf.sparse.fill_empty_rows(st, default)
+            dense = tf.sparse.to_dense(st_, 0, validate_indices=False)
+            dense_ = tf.identity(dense, name=_TFOUTPUT)
+            indicator_ = tf.identity(indicator, name=_TFOUTPUT1)
+            return dense_, indicator_
+        self._run_test_case(func, [_OUTPUT, _OUTPUT1], {_INPUT: i_val, _INPUT1: v_val, _INPUT2: ds_val, _INPUT3: d_val})
+
+    @check_opset_min_version(11, "CumSum")
+    def test_sparse_reshape(self):
+        indices_val = np.array([[1, 0, 0], [1, 0, 2], [1, 1, 3], [3, 2, 2], [3, 2, 3]], dtype=np.int64)
+        values_val = np.array([1.5, 1.6, 1.7, 1.8, 1.9], dtype=np.int64)
+        dense_shape_val = np.array([5, 3, 4], dtype=np.int64)
+        new_shape_val = np.array([2, -1, 1, 3], dtype=np.int64)
+        def func(indices, values, dense_shape, new_shape):
+            st = tf.SparseTensor(indices, values, dense_shape)
+            st_ = tf.sparse.reshape(st, new_shape)
+            indices_ = st_.indices
+            dense_shape_ = st_.dense_shape
+            indices_ = tf.identity(indices_, name=_TFOUTPUT)
+            dense_shape_ = tf.identity(dense_shape_, name=_TFOUTPUT1)
+            return indices_, dense_shape_
+        self._run_test_case(func, [_OUTPUT, _OUTPUT1], {_INPUT: indices_val, _INPUT1: values_val,
+                                                        _INPUT2: dense_shape_val, _INPUT3: new_shape_val})
+
+    @check_opset_min_version(11, "CumSum")
+    def test_sparse_reshape_unknown_rank(self):
+        indices_val = np.array([[1, 0, 0], [1, 0, 2], [1, 1, 3], [3, 2, 2], [3, 2, 3]], dtype=np.int64)
+        values_val = np.array([1.5, 1.6, 1.7, 1.8, 1.9], dtype=np.int64)
+        dense_shape_val = np.array([5, 3, 4], dtype=np.int64)
+        new_shape_val = np.array([2, 10, 1, 3], dtype=np.int64)
+        shape_pad_val = np.zeros((1, 2), dtype=np.int64)
+        def func(indices, dense_shape, new_shape, shape_pad):
+            st = tf.SparseTensor(indices, values_val, dense_shape)
+            # Some hackery to make the rank unknown
+            new_shape_ = tf.pad(new_shape, shape_pad, constant_values=0)
+            st_ = tf.sparse.reshape(st, new_shape_)
+            indices_ = st_.indices
+            dense_shape_ = st_.dense_shape
+            indices_ = tf.identity(indices_, name=_TFOUTPUT)
+            dense_shape_ = tf.identity(dense_shape_, name=_TFOUTPUT1)
+            return indices_, dense_shape_
+        self._run_test_case(func, [_OUTPUT, _OUTPUT1], {_INPUT: indices_val, _INPUT1: dense_shape_val,
+                                                        _INPUT2: new_shape_val, _INPUT3: shape_pad_val})
 
     @check_opset_min_version(9, "Compress")
     def test_dynamic_partition_both_vector(self):
@@ -3303,8 +3575,19 @@ class BackendTests(Tf2OnnxBackendTestBase):
         self._run_test_case(func, [_OUTPUT, _OUTPUT1, _OUTPUT2], {_INPUT: data_val, _INPUT1: part_val})
 
     @check_opset_min_version(11, "ScatterElements")
+    @unittest.skip("this test is failing for some opsets, disabled until fixed")
     def test_dynamic_stitch_both_vector(self):
         data_val = np.array([[5, 1, 3], [7, 2, 4]], dtype=np.float32)
+        indices_val = np.array([[0, 1, 4], [2, 3, 5]], dtype=np.int32)
+        def func(indices, data):
+            x = tf.dynamic_stitch(tf.unstack(indices), tf.unstack(data))
+            x_ = tf.identity(x, name=_TFOUTPUT)
+            return x_
+        self._run_test_case(func, [_OUTPUT], {_INPUT: indices_val, _INPUT1: data_val})
+
+    @check_opset_min_version(11, "ScatterElements")
+    def test_dynamic_stitch_data_tensor(self):
+        data_val = np.arange(2 * 3 * 2 * 4, dtype=np.float32).reshape((2, 3, 2, 4))
         indices_val = np.array([[0, 1, 4], [2, 3, 5]], dtype=np.int32)
         def func(indices, data):
             x = tf.dynamic_stitch(tf.unstack(indices), tf.unstack(data))
@@ -3504,6 +3787,38 @@ class BackendTests(Tf2OnnxBackendTestBase):
             ret = tf.add(lookup_results, 0, name=_TFOUTPUT)
             return ret
         self._run_test_case(func, [_OUTPUT], {_INPUT: query}, constant_fold=False, as_session=True)
+        os.remove(filnm)
+
+    @check_opset_min_version(8, "CategoryMapper")
+    def test_hashtable_lookup_const(self):
+        filnm = "vocab.tmp"
+        words = ["apple", "pear", "banana", "cherry ♥", "grape"]
+        query_val = np.array(['cherry ♥', 'banana'], dtype=np.object).reshape((1, 2, 1))
+        with open(filnm, "w", encoding='UTF-8') as f:
+            for word in words:
+                f.write(word + "\n")
+        def func():
+            hash_table = lookup_ops.index_table_from_file(filnm)
+            query = tf.constant(query_val)
+            lookup_results = hash_table.lookup(query)
+            ret = tf.add(lookup_results, 0, name=_TFOUTPUT)
+            return ret
+        self._run_test_case(func, [_OUTPUT], {}, as_session=True)
+        os.remove(filnm)
+
+    def test_hashtable_size(self):
+        filnm = "vocab.tmp"
+        words = ["apple", "pear", "banana", "cherry", "grape"]
+        query = np.array(['cherry'], dtype=np.object)
+        with open(filnm, "w") as f:
+            for word in words:
+                f.write(word + "\n")
+        def func(query_holder):
+            hash_table = lookup_ops.index_table_from_file(filnm)
+            lookup_size = hash_table.size()
+            ret = tf.add(lookup_size, 0, name=_TFOUTPUT)
+            return ret
+        self._run_test_case(func, [_OUTPUT], {_INPUT: query}, as_session=True)
         os.remove(filnm)
 
     @check_opset_min_version(11)

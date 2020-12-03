@@ -21,12 +21,13 @@ import numpy as np
 import tensorflow as tf
 from tensorflow.python.ops import variables as variables_lib
 import onnx
+from tensorflow.python.ops import lookup_ops
 from common import get_test_config
 from tf2onnx import utils
 from tf2onnx.tfonnx import process_tf_graph
 from tf2onnx import optimizer
 from tf2onnx.tf_loader import tf_reset_default_graph, tf_session, tf_placeholder, from_function, freeze_session
-from tf2onnx.tf_loader import tf_optimize, is_tf2
+from tf2onnx.tf_loader import tf_optimize, is_tf2, get_hash_table_info
 from tf2onnx.tf_utils import compress_graph_def
 from tf2onnx.graph import ExternalTensorStorage
 
@@ -118,6 +119,7 @@ class Tf2OnnxBackendTestBase(unittest.TestCase):
         input_names_with_port = list(feed_dict)
         tf_reset_default_graph()
         graph_def = None
+        initialized_tables = None
 
         np.random.seed(1)  # Make it reproducible.
         clean_feed_dict = {utils.node_name(k): v for k, v in feed_dict.items()}
@@ -158,6 +160,7 @@ class Tf2OnnxBackendTestBase(unittest.TestCase):
                 func(*input_list)
                 variables_lib.global_variables_initializer().run()
                 tf_tables_initializer().run()
+
                 output_dict = []
                 for out_name in output_names_with_port:
                     output_dict.append(sess.graph.get_tensor_by_name(out_name))
@@ -165,6 +168,12 @@ class Tf2OnnxBackendTestBase(unittest.TestCase):
                 graph_def = freeze_session(sess,
                                            input_names=list(feed_dict.keys()),
                                            output_names=output_names_with_port)
+                table_names, key_dtypes, value_dtypes = get_hash_table_info(graph_def)
+                initialized_tables = {}
+                for n, k_dtype, val_dtype in zip(table_names, key_dtypes, value_dtypes):
+                    h = lookup_ops.hash_table_v2(k_dtype, val_dtype, shared_name=n)
+                    k, v = lookup_ops.lookup_table_export_v2(h, k_dtype, val_dtype)
+                    initialized_tables[n] = (sess.run(k), sess.run(v))
 
             tf_reset_default_graph()
             with tf_session() as sess:
@@ -189,13 +198,19 @@ class Tf2OnnxBackendTestBase(unittest.TestCase):
                                  output_names=output_names_with_port,
                                  target=self.config.target,
                                  const_node_values=const_node_values,
+                                 initialized_tables=initialized_tables,
                                  **process_args)
             g = optimizer.optimize_graph(g)
             actual = self.run_backend(g, output_names_with_port, onnx_feed_dict, large_model)
 
         for expected_val, actual_val in zip(expected, actual):
             if check_value:
-                self.assertAllClose(expected_val, actual_val, rtol=rtol, atol=atol)
+                if expected_val.dtype == np.object:
+                    decode = np.vectorize(lambda x: x.decode('UTF-8'))
+                    expected_val_str = decode(expected_val)
+                    self.assertAllEqual(expected_val_str, actual_val)
+                else:
+                    self.assertAllClose(expected_val, actual_val, rtol=rtol, atol=atol)
             if check_dtype:
                 self.assertEqual(expected_val.dtype, actual_val.dtype)
             # why need shape checke: issue when compare [] with scalar
