@@ -24,7 +24,7 @@ class GraphBuilder(object):
     def graph(self):
         return self._g
 
-    def make_slice(self, kwargs, name=None, shapes=None, dtypes=None):
+    def make_slice(self, kwargs, name=None, shapes=None, dtypes=None, return_node=False):
         """
         slice changes its schema at opset 10: it treats some attributes as dynamic input
         so this function has to process inputs according to graph's opset version
@@ -77,8 +77,11 @@ class GraphBuilder(object):
                 if input_data != utils.ONNX_EMPTY_INPUT:
                     utils.make_sure(dtype == self.graph.get_dtype(input_data), "dtype should be same")
 
-        return self.graph.make_node(op_type="Slice", inputs=inputs, attr=attr, name=name,
-                                    outputs=outputs, shapes=shapes, dtypes=dtypes).output[0]
+        node = self.graph.make_node(op_type="Slice", inputs=inputs, attr=attr, name=name,
+                                    outputs=outputs, shapes=shapes, dtypes=dtypes)
+        if return_node:
+            return node
+        return node.output[0]
 
     def make_reduce_sum(self, kwargs, name=None, shapes=None, dtypes=None):
         """
@@ -115,6 +118,88 @@ class GraphBuilder(object):
 
         return self.graph.make_node(op_type="ReduceSum", inputs=inputs, attr=attr, name=name,
                                     outputs=outputs, shapes=shapes, dtypes=dtypes).output[0]
+
+    def make_squeeze(self, kwargs, name=None, shapes=None, dtypes=None, return_node=False, op_name_scope=None):
+        """
+        Squeeze changes its schema at opset 13: it treats axes as a dynamic input
+        kwargs: key could be ["data", "axes"].
+        """
+        outputs = kwargs.pop("outputs", None)
+
+        if self.graph.opset < 13:
+            data = kwargs.pop("data")
+            axes = self.convert_to_attribute(kwargs.pop("axes", None), is_optional=True)
+            attr = {"axes": axes}
+            inputs = [data]
+        else:
+            data = kwargs.pop("data")
+            axes = self.convert_to_input(kwargs.pop("axes", None), "const_axes", is_optional=True, dtype=np.int64)
+            attr = {}
+            inputs = [data, axes]
+
+        if kwargs:
+            logger.warning("kwargs contains un-used key")
+
+        new_attr = {}
+        for key, val in attr.items():
+            if val is not None:
+                new_attr[key] = val
+        attr = new_attr
+
+        for ind, val in enumerate(inputs):
+            if val is None:
+                inputs[ind] = utils.ONNX_EMPTY_INPUT  # empty string means no connection in ONNX
+        # remove tailing ""
+        while inputs[-1] == utils.ONNX_EMPTY_INPUT:
+            inputs = inputs[:-1]
+
+        node = self.graph.make_node(op_type="Squeeze", inputs=inputs, attr=attr, name=name,
+                                    outputs=outputs, shapes=shapes, dtypes=dtypes,
+                                    op_name_scope=op_name_scope)
+        if return_node:
+            return node
+        return node.output[0]
+
+    def make_unsqueeze(self, kwargs, name=None, shapes=None, dtypes=None, return_node=False, op_name_scope=None):
+        """
+        Unsqueeze changes its schema at opset 13: it treats axes as a dynamic input
+        kwargs: key could be ["data", "axes"].
+        """
+        outputs = kwargs.pop("outputs", None)
+
+        if self.graph.opset < 13:
+            data = kwargs.pop("data")
+            axes = self.convert_to_attribute(kwargs.pop("axes", None), is_optional=True)
+            attr = {"axes": axes}
+            inputs = [data]
+        else:
+            data = kwargs.pop("data")
+            axes = self.convert_to_input(kwargs.pop("axes", None), "const_axes", is_optional=True, dtype=np.int64)
+            attr = {}
+            inputs = [data, axes]
+
+        if kwargs:
+            logger.warning("kwargs contains un-used key")
+
+        new_attr = {}
+        for key, val in attr.items():
+            if val is not None:
+                new_attr[key] = val
+        attr = new_attr
+
+        for ind, val in enumerate(inputs):
+            if val is None:
+                inputs[ind] = utils.ONNX_EMPTY_INPUT  # empty string means no connection in ONNX
+        # remove tailing ""
+        while inputs[-1] == utils.ONNX_EMPTY_INPUT:
+            inputs = inputs[:-1]
+
+        node = self.graph.make_node(op_type="Unsqueeze", inputs=inputs, attr=attr, name=name,
+                                    outputs=outputs, shapes=shapes, dtypes=dtypes,
+                                    op_name_scope=op_name_scope)
+        if return_node:
+            return node
+        return node.output[0]
 
     def convert_to_input(self, tensor, const_name, is_optional=False, dtype=None):
         """in ONNX, input shold come from node, so it must be a string"""
