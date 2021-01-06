@@ -951,6 +951,13 @@ class Graph(object):
             return shape
         return shape
 
+    def get_rank(self, name):
+        """Returns len(get_shape(name)) or None if shape is None"""
+        shape = self.get_shape(name)
+        if shape is None:
+            return None
+        return len(shape)
+
     def set_shape(self, name, val):
         """Set new shape of node."""
         if isinstance(val, np.ndarray):
@@ -1134,6 +1141,9 @@ class Graph(object):
                 opsets.extend(self.extra_opset)
             kwargs["opset_imports"] = opsets
         model_proto = helper.make_model(graph, **kwargs)
+
+        utils.make_sure(self.opset in constants.OPSET_TO_IR_VERSION,
+                        "Opset %s is not supported yet. Please use a lower opset" % self.opset)
 
         # set the IR version based on opset
         try:

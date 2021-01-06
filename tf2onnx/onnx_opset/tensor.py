@@ -625,6 +625,10 @@ class Split:
         # no change
         cls.version_1(ctx, node, **kwargs)
 
+    @classmethod
+    def version_13(cls, ctx, node, **kwargs):
+        # Default axis is not -1 but doesn't matter since we always set it.
+        cls.version_1(ctx, node, **kwargs)
 
 @tf_op("SplitV")
 class SplitV:
@@ -651,6 +655,26 @@ class SplitV:
     @classmethod
     def version_2(cls, ctx, node, **kwargs):
         cls.version_1(ctx, node, **kwargs)
+
+    @classmethod
+    def version_13(cls, ctx, node, **kwargs):
+        # Split now supports dynamic split lengths
+        if node.inputs[1].is_const():
+            # Call version 1 to deal with -1 cases
+            cls.version_1(ctx, node, **kwargs)
+            # Convert attr to input
+            split_val = node.get_attr_value("split")
+            split_const = ctx.make_const(utils.make_name("split"), np.array(split_val, np.int64))
+            ctx.replace_inputs(node, [node.input[0], split_const.output[0]])
+            del node.attr["split"]
+        else:
+            # Technically incorrect if any of the splits are -1
+            node.type = "Split"
+            split_dims = node.inputs[2].get_tensor_value()
+            ctx.remove_input(node, node.input[2], 2)
+            node.set_attr("axis", split_dims)
+            if ctx.get_dtype(node.input[1]) != TensorProto.INT64:
+                ctx.insert_new_node_on_input(node, "Cast", node.input[1], to=TensorProto.INT64)
 
 
 @tf_op("ExpandDims")
@@ -781,8 +805,10 @@ class StridedSlice:
             # insert_new_node_on_output(self, op_type, output_name=None, name=None, inputs=None, domain=None, **kwargs)
             # ctx.insert_new_node_on_output("Squeeze", node.output[0], name)
             name = utils.make_name(node.name)
-            squeeze_node = ctx.insert_new_node_on_output("Squeeze", node.output[0], name)
-            squeeze_node.set_attr("axes", needs_squeeze)
+            squeeze_node = GraphBuilder(ctx).make_squeeze(
+                {"axes": needs_squeeze, 'data': node.output[0]}, name=name, return_node=True)
+            ctx.insert_node_on_output(squeeze_node)
+
             nodes.append(squeeze_node)
             input_dtype = ctx.get_dtype(node.output[0])
             ctx.set_dtype(squeeze_node.output[0], input_dtype)
@@ -999,8 +1025,9 @@ class StridedSlice:
         node = GraphBuilder(ctx).make_slice(kwargs, name=node.name, dtypes=out_dtypes, shapes=out_shapes)
         node = ctx.get_node_by_output(node)
         if needs_squeeze:
-            squeeze_node = ctx.insert_new_node_on_output("Squeeze", node.output[0], node.child_name())
-            squeeze_node.set_attr("axes", needs_squeeze)
+            squeeze_node = GraphBuilder(ctx).make_squeeze(
+                {"axes": needs_squeeze, "data": node.output[0]}, name=node.child_name(), return_node=True)
+            ctx.insert_node_on_output(squeeze_node, node.output[0])
             input_dtype = ctx.get_dtype(node.output[0])
             ctx.set_dtype(squeeze_node.output[0], input_dtype)
             ctx.copy_shape(node.output[0], squeeze_node.output[0])
@@ -1165,7 +1192,8 @@ class Unpack:
         # for each output we need to squeeze axis
         for n in node.output:
             op_name = utils.make_name(node.name)
-            squeeze_node = ctx.insert_new_node_on_output("Squeeze", n, name=op_name, axes=[axis])
+            squeeze_node = GraphBuilder(ctx).make_squeeze({'data': n, 'axes': [axis]}, name=op_name, return_node=True)
+            ctx.insert_node_on_output(squeeze_node, n)
             ctx.copy_shape(n, squeeze_node.output[0])
             ctx.copy_dtype(n, squeeze_node.output[0])
 
@@ -1229,8 +1257,8 @@ class OneHot:
         depth = GraphBuilder(ctx).make_unsqueeze({'data': node.input[1], 'axes': [0]})
         on_value = node.input[2]
         off_value = node.input[3]
-        on_value = ctx.make_node("Unsqueeze", [on_value], attr={"axes": [0]}).output[0]
-        off_value = ctx.make_node("Unsqueeze", [off_value], attr={"axes": [0]}).output[0]
+        on_value = GraphBuilder(ctx).make_unsqueeze({'data': on_value, 'axes': [0]})
+        off_value = GraphBuilder(ctx).make_unsqueeze({'data': off_value, 'axes': [0]})
         off_on_value = ctx.make_node("Concat", [off_value, on_value], attr={"axis": 0}).output[0]
 
         indices = node.input[0]
@@ -1324,7 +1352,8 @@ class BatchToSpace:
             # NHWC TO CNHW, so onnx op will work on "N" which is the same as tensorflow
             if len(input_shape) == 3:
                 # insert automatically an Unsqueeze op if the input is 3d
-                unsqz1 = ctx.make_node("Unsqueeze", input_tensor.output, {"axes": [3]})
+                unsqz1 = GraphBuilder(ctx).make_unsqueeze(
+                    {"axes": [3], "data": input_tensor.output[0]}, return_node=True)
                 trans1 = ctx.make_node("Transpose", unsqz1.output, {"perm": [3, 0, 1, 2]})
             else:
                 trans1 = ctx.make_node("Transpose", input_tensor.output, {"perm": [3, 0, 1, 2]})
@@ -1353,8 +1382,8 @@ class BatchToSpace:
                 kwargs = {**inputs_map}
                 ctx.remove_node(node.name)
                 slice1 = GraphBuilder(ctx).make_slice(kwargs)
-                ctx.make_node("Squeeze", [slice1], {"axes": [3]},
-                              outputs=node.output, name=node.name, dtypes=dtypes, shapes=shapes)
+                GraphBuilder(ctx).make_squeeze(
+                    {"axes": [3], "data": slice1, "outputs": node.output}, name=node.name, dtypes=dtypes, shapes=shapes)
             else:
                 kwargs = {**inputs_map, "outputs": node.output}
                 ctx.remove_node(node.name)
@@ -1362,12 +1391,11 @@ class BatchToSpace:
         else:
             def mknode(optype, inputs, attrs=None):
                 nodename = utils.make_name(node.name + '_' + optype.lower())
-                if opset < 13 or optype != 'Squeeze':
-                    return ctx.make_node(optype, inputs, attrs, name=nodename)
-                inputs.append(attrs['axes'])
-                attrs = attrs.copy()
-                attrs.pop('axes')
+                if opset >= 13 and optype == 'Squeeze':
+                    return GraphBuilder(ctx).make_squeeze(
+                        {"axes": attrs['axes'], "data": inputs[0]}, name=nodename, return_node=True)
                 return ctx.make_node(optype, inputs, attrs, name=nodename)
+
 
             # support non 3D/4D tensors and dynamic crop vals
             # dynamic slice starts at opset 10
@@ -1610,8 +1638,9 @@ class NonMaxSuppression:
             # add valid_outputs count
             output_idx = 2 if node.type in ["NonMaxSuppressionV5"] else 1
             shape_op = ctx.make_node("Shape", inputs=[nms_output.output[0]])
-            reduce_op = ctx.make_node("ReduceSum", inputs=shape_op.output, attr={"axes": [0], "keepdims": 0})
-            ctx.make_node("Cast", inputs=[reduce_op.output[0]], attr={"to": onnx_pb.TensorProto.INT32},
+            reduce_op = GraphBuilder(ctx).make_reduce_sum(
+                {"data": shape_op.output[0], "axes": [0], "keepdims": 0, "noop_with_empty_axes": 1})
+            ctx.make_node("Cast", inputs=[reduce_op], attr={"to": onnx_pb.TensorProto.INT32},
                           outputs=[node.output[output_idx]], dtypes=dtypes[output_idx], shapes=shapes[output_idx],
                           op_name_scope=node.name)
 
@@ -2005,6 +2034,86 @@ class SparseToDense:
         ctx.replace_inputs(node, [expand_node.output[0], sparse_indices, sparse_vals])
 
 
+@tf_op("RaggedRange")
+class RaggedRange:
+    @classmethod
+    def version_11(cls, ctx, node, **kwargs):
+        starts, limits, deltas = node.input
+        data_dtype = ctx.get_dtype(starts)
+        data_np_dtype = utils.map_onnx_to_numpy_type(data_dtype)
+        data_is_float = np.dtype(data_np_dtype).kind == 'f'
+
+        if data_is_float:
+            sub_node = ctx.make_node("Sub", [limits, starts]).output[0]
+            div_node = ctx.make_node("Div", [sub_node, deltas]).output[0]
+            ceil_node = ctx.make_node("Ceil", [div_node]).output[0]
+            row_lens = ctx.make_node("Cast", [ceil_node], attr={'to': TensorProto.INT64}).output[0]
+
+        else:
+            # compute ceil(a/b) with ints
+            starts_cast = ctx.make_node("Cast", [starts], attr={'to': TensorProto.INT64}).output[0]
+            limits_cast = ctx.make_node("Cast", [limits], attr={'to': TensorProto.INT64}).output[0]
+            deltas_cast = ctx.make_node("Cast", [deltas], attr={'to': TensorProto.INT64}).output[0]
+            sub_node = ctx.make_node("Sub", [limits_cast, starts_cast]).output[0]
+            div_node = ctx.make_node("Div", [sub_node, deltas_cast]).output[0]
+            mul_node = ctx.make_node("Mul", [div_node, deltas_cast]).output[0]
+            eq_node = ctx.make_node("Equal", [mul_node, sub_node]).output[0]
+            ne_node = ctx.make_node("Not", [eq_node]).output[0]
+            # we want to round up if it isn't evenly divisible
+            offset = ctx.make_node("Cast", [ne_node], attr={'to': TensorProto.INT64}).output[0]
+            row_lens = ctx.make_node("Add", [div_node, offset]).output[0]
+
+        const_zero_int64 = ctx.make_const(utils.make_name("const_zero"), np.array(0, dtype=np.int64)).output[0]
+        if ctx.opset <= 11:
+            const_zero_double = ctx.make_const(utils.make_name("const_zero"), np.array(0, dtype=np.float64)).output[0]
+            row_lens = ctx.make_node("Cast", [row_lens], attr={'to': TensorProto.DOUBLE}).output[0]
+            row_lens = ctx.make_node("Max", [row_lens, const_zero_double]).output[0]
+            row_lens = ctx.make_node("Cast", [row_lens], attr={'to': TensorProto.INT64}).output[0]
+        else:
+            row_lens = ctx.make_node("Max", [row_lens, const_zero_int64]).output[0]
+
+        const_zero_list = ctx.make_const(utils.make_name("const_zero_list"), np.array([0], dtype=np.int64)).output[0]
+
+        max_row_len = ctx.make_node("ReduceMax", [row_lens], attr={'axes': [0], 'keeepdims': False}).output[0]
+        inp_shape = ctx.make_node("Shape", [row_lens]).output[0]
+        range_len = ctx.make_node("Mul", [max_row_len, inp_shape]).output[0]
+
+        # ORT seems to have a shape inference bug for the Range node. Use CumSum instead.
+        one_tensor = helper.make_tensor("value", TensorProto.INT64, dims=[1], vals=[1])
+        ones_of_shape = ctx.make_node("ConstantOfShape", [range_len], attr={"value": one_tensor}).output[0]
+        range_node = ctx.make_node("CumSum", [ones_of_shape, const_zero_int64], attr={'exclusive': True}).output[0]
+        #const_one_int64 = ctx.make_const(utils.make_name("const_one"), np.array(1, dtype=np.int64)).output[0]
+        #range_node = ctx.make_node("Range", [const_zero_int64, range_len, const_one_int64]).output[0]
+
+        col_indices_dense = ctx.make_node("Mod", [range_node, max_row_len]).output[0]
+        row_indices_dense = ctx.make_node("Div", [range_node, max_row_len]).output[0]
+        row_lens_dense = ctx.make_node("Gather", [row_lens, row_indices_dense]).output[0]
+        indices_to_keep = ctx.make_node("Less", [col_indices_dense, row_lens_dense]).output[0]
+        col_indices = ctx.make_node("Compress", [col_indices_dense, indices_to_keep]).output[0]
+        row_indices = ctx.make_node("Compress", [row_indices_dense, indices_to_keep]).output[0]
+
+
+        split_ends = ctx.make_node("CumSum", [row_lens, const_zero_int64]).output[0]
+        splits_out = ctx.make_node("Concat", [const_zero_list, split_ends], attr={'axis': 0}).output[0]
+        col_indices_cast = ctx.make_node("Cast", [col_indices], attr={'to': data_dtype}).output[0]
+
+        if ctx.get_rank(starts) != 1:
+            starts = ctx.make_node("Expand", [starts, inp_shape]).output[0]
+
+        if ctx.get_rank(deltas) != 1:
+            deltas = ctx.make_node("Expand", [deltas, inp_shape]).output[0]
+
+        gather_starts = ctx.make_node("Gather", [starts, row_indices]).output[0]
+        gather_deltas = ctx.make_node("Gather", [deltas, row_indices]).output[0]
+
+        mul_node = ctx.make_node("Mul", [col_indices_cast, gather_deltas], op_name_scope=node.name).output[0]
+        dense_vals_out = ctx.make_node("Add", [gather_starts, mul_node], op_name_scope=node.name).output[0]
+
+        ctx.replace_all_inputs(node.output[0], splits_out)
+        ctx.replace_all_inputs(node.output[1], dense_vals_out)
+        ctx.remove_node(node.name)
+
+
 @tf_op("SparseReshape")
 class SparseReshape:
     @classmethod
@@ -2358,7 +2467,8 @@ class MatrixDiagPartV2V3:
         pad_length_2 = body_graph.make_node('Concat', [zeo, pad_length.output[0]], attr={'axis': 0})
         padded_range = body_graph.make_node('Pad', [sliced_range.output[0], pad_length_2.output[0]])
         # opset == 11, no need to change unsqueeze
-        unsqueezed_range = body_graph.make_node('Unsqueeze', [padded_range.output[0]], attr={'axes': [1]})
+        unsqueezed_range = GraphBuilder(body_graph).make_unsqueeze(
+            {'data': padded_range.output[0], 'axes': [1]}, return_node=True)
         half_shape_x = body_graph.make_node('Slice',
                                             [new_shape.output[0], zeo, minus_two])
         shape_range = body_graph.make_node('Shape', [unsqueezed_range.output[0]])
@@ -2366,7 +2476,8 @@ class MatrixDiagPartV2V3:
         expanded_range = body_graph.make_node('Expand', [unsqueezed_range.output[0], full_shape.output[0]])
         gathered_input = body_graph.make_node('GatherElements', [processed_input.output[0], expanded_range.output[0]],
                                               attr={'axis': -1})
-        squeezed_input = body_graph.make_node('Squeeze', [gathered_input.output[0]], attr={'axes': [-1]})
+        squeezed_input = GraphBuilder(body_graph).make_squeeze(
+            {'data': gathered_input.output[0], 'axes': [-1]}, return_node=True)
         left_width = body_graph.make_node('Sub', [new_width.output[0], abs_k.output[0]])
         dims = body_graph.make_node('Concat', [left_width.output[0], new_depth.output[0]], attr={'axis': 0})
         valid_dim = body_graph.make_node('ReduceMin', [dims.output[0]])
@@ -2478,8 +2589,8 @@ class MatrixDiagPartV2V3:
                                                raw_output_shape + [-1])
         squeeze_sliced_graph = ctx.create_new_graph_with_same_config()
         squeeze_sliced_graph.parent_graph = ctx
-        squeeze_sliced = squeeze_sliced_graph.make_node('Squeeze', [final_output_right_sliced.output[0]],
-                                                        attr={'axes': [-2]})
+        squeeze_sliced = GraphBuilder(squeeze_sliced_graph).make_squeeze(
+            {'data': final_output_right_sliced.output[0], 'axes': [-2]}, return_node=True)
         squeeze_sliced_graph.add_graph_output(squeeze_sliced.output[0], ctx.get_dtype(node.input[0]), raw_output_shape)
         shapes = node.output_shapes
         dtypes = node.output_dtypes
@@ -2653,14 +2764,14 @@ class MatrixDiagPartV2V3:
 @tf_op(["MatrixDiag", "MatrixDiagV2", "MatrixDiagV3"])
 class MatrixDiag:
     @classmethod
-    def any_version(cls, opset, ctx, node, **kwargs):
+    def version_12(cls, ctx, node, **kwargs):
         # Assemble MatrixDiagV3 by ReverseSequence
         argc = len(node.input)
 
-        if opset >= 13:
-            squeeze_axes0 = ctx.make_const(utils.make_name("const_axes"), np.array([0], dtype=np.int64))
-            squeeze_axes_1 = ctx.make_const(utils.make_name("const_axes"), np.array([-1], dtype=np.int64))
-            squeeze_axes_2 = ctx.make_const(utils.make_name("const_axes"), np.array([-2], dtype=np.int64))
+        if ctx.opset >= 13:
+            squeeze_axes0 = ctx.make_const(utils.make_name("const_axes"), np.array([0], dtype=np.int64)).output[0]
+            squeeze_axes_1 = ctx.make_const(utils.make_name("const_axes"), np.array([-1], dtype=np.int64)).output[0]
+            squeeze_axes_2 = ctx.make_const(utils.make_name("const_axes"), np.array([-2], dtype=np.int64)).output[0]
 
         minus_two, minus_one, zeo, one, two = \
             [n.output[0] for n in ctx.make_consts([[-2], [-1], [0], [1], [2]])]
@@ -2685,7 +2796,7 @@ class MatrixDiag:
             diag = node.input[0]
             shape = ctx.get_shape(diag)
             if len(shape) == 1:
-                if opset < 13:
+                if ctx.opset < 13:
                     diag = mknode("Unsqueeze", [diag], attr={"axes": [0]})
                 else:
                     diag = mknode("Unsqueeze", [diag, squeeze_axes0])
@@ -2710,7 +2821,7 @@ class MatrixDiag:
             def ex_diag():
                 g = ctx.create_new_graph_with_same_config()
                 g.parent_graph = ctx
-                if opset < 13:
+                if ctx.opset < 13:
                     ex = mknode2(g, "Unsqueeze", [diag], attr={"axes": [-2]})
                 else:
                     ex = mknode2(g, "Unsqueeze", [diag, squeeze_axes_2])
@@ -2728,7 +2839,7 @@ class MatrixDiag:
         def squeeze_13(name):
             return ctx.make_node("Squeeze", [name, squeeze_axes_1]).output[0]
 
-        squeeze = squeeze_12 if opset < 13 else squeeze_13
+        squeeze = squeeze_12 if ctx.opset < 13 else squeeze_13
 
         # gather inputs
         diag, k, k_min, k_max, k_max_nxt = processdiag()
@@ -2992,13 +3103,9 @@ class MatrixDiag:
                       outputs=node.output, shapes=shapes, dtypes=dtypes)
 
     @classmethod
-    def version_12(cls, ctx, node, **kwargs):
-        cls.any_version(12, ctx, node, **kwargs)
-
-    @classmethod
     def version_13(cls, ctx, node, **kwargs):
         # Parameters moved to inputs for operator Squeeze, Unsqueeze.
-        cls.any_version(13, ctx, node, **kwargs)
+        cls.version_12(ctx, node, **kwargs)
 
 
 @tf_op("MatrixSetDiagV3")
