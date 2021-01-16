@@ -10,6 +10,7 @@ from __future__ import unicode_literals
 import unittest
 from distutils.version import StrictVersion
 import numpy as np
+import onnx
 from onnx import TensorProto
 from backend_test_base import Tf2OnnxBackendTestBase
 from common import *  # pylint: disable=wildcard-import,unused-wildcard-import
