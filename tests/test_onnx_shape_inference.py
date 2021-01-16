@@ -8,6 +8,7 @@ from __future__ import print_function
 from __future__ import unicode_literals
 
 import unittest
+from distutils.version import StrictVersion
 import numpy as np
 from onnx import TensorProto
 from backend_test_base import Tf2OnnxBackendTestBase
