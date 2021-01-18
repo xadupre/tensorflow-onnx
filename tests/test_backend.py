@@ -1,6 +1,6 @@
+# SPDX-License-Identifier: Apache-2.0
 
-# Copyright (c) Microsoft Corporation. All rights reserved.
-# Licensed under the MIT license.
+
 
 """Unit tests using onnx backends."""
 
@@ -23,7 +23,7 @@ from backend_test_base import Tf2OnnxBackendTestBase
 from common import *  # pylint: disable=wildcard-import,unused-wildcard-import
 from tf2onnx import constants, utils
 from tf2onnx.graph_matcher import OpTypePattern, GraphMatcher
-from tf2onnx.tf_loader import is_tf2, tf_placeholder_with_default
+from tf2onnx.tf_loader import is_tf2, tf_placeholder_with_default, tf_placeholder
 from tf2onnx.onnx_opset.signal import make_dft_constant
 
 # pylint: disable=missing-docstring,invalid-name,unused-argument,function-redefined,cell-var-from-loop
@@ -727,6 +727,33 @@ class BackendTests(Tf2OnnxBackendTestBase):
             return tf.identity(y, name=_TFOUTPUT)
         x_feed_val = np.array([11.0, 22.0, -33.0, -44.0], dtype=np.float32).reshape((2, 2))
         self._run_test_case(func, [_OUTPUT], {_INPUT: x_feed_val}, as_session=True, premade_placeholders=True)
+
+    def test_placeholder_with_default_computed_use_default(self):
+        x_val = np.array([1.0, 2.0, -3.0, -4.0], dtype=np.float32).reshape((2, 2))
+        y_val = np.array([2.0, -4.0, 6.0, -8.0], dtype=np.float32).reshape((2, 2))
+        def func():
+            x = tf_placeholder(tf.float32, x_val.shape, name=_TFINPUT)
+            y = tf_placeholder(tf.float32, y_val.shape, name=_TFINPUT1)
+            total = tf.add(x, y)
+            z = tf_placeholder_with_default(total, x_val.shape, name=_TFINPUT2)
+            total2 = tf.add(total, z)
+            return tf.identity(total2, name=_TFOUTPUT)
+        self._run_test_case(func, [_OUTPUT], {_INPUT: x_val, _INPUT1: y_val}, as_session=True,
+                            premade_placeholders=True, process_args={'use_default': [_TFINPUT2]})
+
+    def test_placeholder_with_default_computed_ignore_default(self):
+        x_val = np.array([1.0, 2.0, -3.0, -4.0], dtype=np.float32).reshape((2, 2))
+        y_val = np.array([2.0, -4.0, 6.0, -8.0], dtype=np.float32).reshape((2, 2))
+        z_val = np.array([3.0, 6.0, 9.0, 10.0], dtype=np.float32).reshape((2, 2))
+        def func():
+            x = tf_placeholder(tf.float32, x_val.shape, name=_TFINPUT)
+            y = tf_placeholder(tf.float32, y_val.shape, name=_TFINPUT1)
+            total = tf.add(x, y)
+            z = tf_placeholder_with_default(total, x_val.shape, name=_TFINPUT2)
+            total2 = tf.add(total, z)
+            return tf.identity(total2, name=_TFOUTPUT)
+        self._run_test_case(func, [_OUTPUT], {_INPUT: x_val, _INPUT1: y_val, _INPUT2: z_val}, as_session=True,
+                            premade_placeholders=True, process_args={'ignore_default': [_TFINPUT2]})
 
     @check_onnxruntime_incompatibility("Add")
     def test_add_bcast(self):
@@ -3738,6 +3765,23 @@ class BackendTests(Tf2OnnxBackendTestBase):
             return indices_, dense_shape_
         self._run_test_case(func, [_OUTPUT, _OUTPUT1], {_INPUT: indices_val, _INPUT1: dense_shape_val,
                                                         _INPUT2: new_shape_val, _INPUT3: shape_pad_val})
+
+    @check_tf_min_version("1.14", "ragged needs tf 1.14")
+    @check_opset_min_version(11, "CumSum")
+    def test_ragged_tensor_to_sparse(self):
+        splits_val1 = np.array([0, 1, 1, 5], dtype=np.int32)
+        splits_val2 = np.array([0, 3, 3, 5, 9, 10], dtype=np.int32)
+        dense_vals_val = np.array([10, 11, 12, 13, 14, 15, 16, 17, 18, 19], dtype=np.float32)
+        def func(splits1, splits2, rt_dense_values):
+            x = tf.RaggedTensor.from_nested_row_splits(rt_dense_values, [splits1, splits2], validate=True)
+            s = x.to_sparse()
+            indices, values, shape = s.indices, s.values, s.dense_shape
+            indices = tf.identity(indices, name=_TFOUTPUT)
+            values = tf.identity(values, name=_TFOUTPUT1)
+            shape = tf.identity(shape, name=_TFOUTPUT2)
+            return indices, values, shape
+        self._run_test_case(func, [_OUTPUT, _OUTPUT1, _OUTPUT2],
+                            {_INPUT: splits_val1, _INPUT1: splits_val2, _INPUT2: dense_vals_val})
 
     @check_tf_min_version("1.14", "ragged needs tf 1.14")
     @check_opset_min_version(11, "Range")
