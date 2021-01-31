@@ -7,7 +7,9 @@ from __future__ import division
 from __future__ import print_function
 from __future__ import unicode_literals
 
+import sys
 import unittest
+from datetime import datetime
 import numpy as np
 from onnx import helper, TensorProto, OperatorSetIdProto
 from backend_test_base import Tf2OnnxBackendTestBase
@@ -15,6 +17,14 @@ from common import unittest_main, group_nodes_by_type, check_opset_min_version, 
 from tf2onnx import utils, constants
 from tf2onnx.graph import GraphUtil
 
+
+def is_2021h2():
+    vers = sys.version_info[:2]
+    if vers == (3, 9):
+        now = datetime.now()
+        dt = datetime(2021, 7, 1)
+        return now < dt
+    return False
 
 # pylint: disable=missing-docstring,invalid-name,unused-argument,using-constant-test
 
@@ -835,6 +845,7 @@ class OptimizerTests(Tf2OnnxBackendTestBase):
         self.run_and_compare(output_names_with_port, onnx_feed_dict, origin_proto, op_type="Identity",
                              remaining_op_num=remaining_identity_num, debug=debug, rtol=rtol)
 
+    @unittest.skipIf(is_2021h2(), reason="tensorflow on python3.9")
     def test_identity_non_graph_output(self):
         node1 = helper.make_node("Add", ["X", "X"], ["Y"], name="add")
         node2 = helper.make_node("Identity", ["Y"], ["Z"], name="identity")
