@@ -298,6 +298,7 @@ class OptimizerTests(Tf2OnnxBackendTestBase):
         self.run_transpose_compare(["OUT"], {"X": np.random.randn(2, 3, 4, 5).astype(np.float32)},
                                    model_proto, remaining_transpose_num=1)
 
+    @unittest.skipIf(is_2021h2(), reason="tensorflow on python3.9")
     def test_transpose_with_shape(self):
         node1 = helper.make_node("Transpose", ["X"], ["Y"], perm=[0, 2, 3, 1], name="trans")
         node2 = helper.make_node("Shape", ["Y"], ["Z"], name="shape")
