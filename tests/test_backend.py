@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
 
-
 """Unit tests using onnx backends."""
 
 from __future__ import division
@@ -74,6 +73,7 @@ if is_tf2():
     floormod = tf.math.floormod
     matrix_diag_part = tf.compat.v1.matrix_diag_part
     fake_quant_with_min_max_args = tf.quantization.fake_quant_with_min_max_args
+    fake_quant_with_min_max_vars = tf.quantization.fake_quant_with_min_max_vars
 elif LooseVersion(tf.__version__) >= "1.13":
     conv2d_backprop_input = tf.compat.v1.nn.conv2d_backprop_input
     conv3d_transpose = tf.compat.v1.nn.conv3d_transpose
@@ -95,6 +95,7 @@ elif LooseVersion(tf.__version__) >= "1.13":
     floormod = tf.floormod
     matrix_diag_part = tf.compat.v1.matrix_diag_part
     fake_quant_with_min_max_args = tf.compat.v1.quantization.fake_quant_with_min_max_args
+    fake_quant_with_min_max_vars = tf.compat.v1.quantization.fake_quant_with_min_max_vars
 else:
     conv2d_backprop_input = tf.nn.conv2d_backprop_input
     conv3d_transpose = tf.nn.conv3d_transpose
@@ -604,6 +605,20 @@ class BackendTests(Tf2OnnxBackendTestBase):
         def func(x):
             kernel = tf.constant(kernel_val, dtype=tf.float32, name='k')
             conv = tf.nn.depthwise_conv2d(x, kernel, strides=[1, 1, 1, 1], padding='VALID')
+            return tf.identity(conv, name=_TFOUTPUT)
+        # rtol is a bit high, 2 values have a bit high error. Maybe use different input data.
+        self._run_test_case(func, [_OUTPUT], {_INPUT: x_val}, rtol=0.01)
+
+    @check_tf_min_version("1.14", "tf depthwise_conv2d dilations")
+    @check_opset_min_version(11, "non-const pads")
+    def test_depthwiseconv_dilations(self):
+        x_shape = [1, 32, 32, 1]
+        kernel_shape = [5, 5, 1, 1]
+        x_val = np.arange(1, 1 + np.prod(x_shape)).astype("float32").reshape(x_shape)
+        kernel_val = np.arange(1, 1 + np.prod(kernel_shape)).astype("float32").reshape(kernel_shape)
+        def func(x):
+            kernel = tf.constant(kernel_val, dtype=tf.float32, name='k')
+            conv = tf.nn.depthwise_conv2d(x, kernel, strides=[1, 1, 1, 1], padding='SAME', dilations=[3, 4])
             return tf.identity(conv, name=_TFOUTPUT)
         # rtol is a bit high, 2 values have a bit high error. Maybe use different input data.
         self._run_test_case(func, [_OUTPUT], {_INPUT: x_val}, rtol=0.01)
@@ -1532,6 +1547,7 @@ class BackendTests(Tf2OnnxBackendTestBase):
             self._run_test_case(func, [_OUTPUT], {_INPUT: data_val, _INPUT1: indices_val, _INPUT2: segs_val})
 
     @check_opset_min_version(9, "OneHot")
+    @check_tf_min_version("2.3", "needs tf 2.3")
     def test_unsorted_segment_ops(self):
         tf_ops = [
             tf.math.unsorted_segment_max,
@@ -2227,6 +2243,23 @@ class BackendTests(Tf2OnnxBackendTestBase):
         x_val = np.arange(5*10*10*10*10*20*30).astype("float32").reshape((5, 10, 10, 10, 10, 20, 30))
         y_val = np.array(9, dtype=np.int32)
         self._run_test_case(func, [_OUTPUT], {_INPUT: x_val, _INPUT1: y_val})
+
+    @check_opset_min_version(10, "Slice")
+    @skip_tflite("not supported in tflite")
+    def test_strided_slice_ellipse(self):
+        def func1(x):
+            x_ = x[..., tf.newaxis]
+            return tf.identity(x_, name=_TFOUTPUT)
+        shape = [1, 8, 64]
+        x_val = np.arange(np.prod(shape)).astype("float32").reshape(shape)
+        self._run_test_case(func1, [_OUTPUT], {_INPUT: x_val})
+
+        def func2(x):
+            x_ = x[:, tf.newaxis, ..., :, tf.newaxis]
+            return tf.identity(x_, name=_TFOUTPUT)
+        shape = [2, 3, 4, 5]
+        x_val = np.arange(np.prod(shape)).astype("float32").reshape(shape)
+        self._run_test_case(func2, [_OUTPUT], {_INPUT: x_val})
 
     @check_opset_min_version(7, "batchnorm")
     def test_fused_batchnorm(self):
@@ -4366,6 +4399,28 @@ class BackendTests(Tf2OnnxBackendTestBase):
             self._run_test_case(func_neg, [_OUTPUT], {_INPUT: x_val}, rtol=1e-6, atol=1e-4)
         except ValueError:
             pass
+
+    @check_opset_min_version(10)
+    @check_tf_min_version("1.14")
+    def test_fakequant_with_min_max_vars(self):
+        def func(x):
+            ret = fake_quant_with_min_max_vars(
+                x, min=-1024, max=1023, num_bits=8, narrow_range=False, name=None)
+            return tf.identity(ret, name=_TFOUTPUT)
+
+        x_val = np.random.random(size=[4, 3]).astype(np.float32) * 2048. - 1024.
+        x_val0 = np.abs(x_val)
+        self._run_test_case(func, [_OUTPUT], {_INPUT: x_val0}, rtol=1e-6, atol=1e-4)
+        self._run_test_case(func, [_OUTPUT], {_INPUT: x_val}, rtol=1e-6, atol=1e-4)
+
+        x_val = np.random.random(size=[4, 3]).astype(np.float32) * 2048. - 1024
+        x_val[0, 0] = -1024
+        x_val[0, 1] = -1023
+        x_val[0, 2] = 1024
+        x_val[1, 0] = 1023
+        x_val[1, 1] = 1025
+        x_val[1, 2] = -1025
+        self._run_test_case(func, [_OUTPUT], {_INPUT: x_val}, rtol=1e-6, atol=1e-4)
 
     @check_opset_min_version(9, "atan2")
     def test_atan2(self):
