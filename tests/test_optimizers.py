@@ -21,7 +21,7 @@ from tf2onnx.graph import GraphUtil
 
 def is_2021h2():
     vers = sys.version_info[:2]
-    if vers == (3, 9):
+    if vers in [(3, 9), (3, 8)]:
         now = datetime.now()
         dt = datetime(2021, 7, 1)
         return now < dt
@@ -437,11 +437,11 @@ class OptimizerTests(Tf2OnnxBackendTestBase):
         self.run_transpose_compare(["OUT"], {"X": np.random.randn(*input_shape1).astype(np.float32)},
                                    model_proto, remaining_transpose_num=1)
 
-    @unittest.skipIf(is_2021h2(), reason="tensorflow on python3.9")
     @parameterized.expand([
         ((2, 3, 4, 5), [0, 2, 3, 1]),
         ((2, 3, 4, 5, 6), [0, 2, 3, 4, 1]),
     ])
+    @unittest.skipIf(is_2021h2(), reason="tensorflow on python3.9")
     def test_transpose_with_shape(self, shape, perm):
         node1 = helper.make_node("Transpose", ["X"], ["Y"], perm=perm, name="trans")
         node2 = helper.make_node("Shape", ["Y"], ["Z"], name="shape")
