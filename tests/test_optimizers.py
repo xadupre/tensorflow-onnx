@@ -437,6 +437,7 @@ class OptimizerTests(Tf2OnnxBackendTestBase):
         self.run_transpose_compare(["OUT"], {"X": np.random.randn(*input_shape1).astype(np.float32)},
                                    model_proto, remaining_transpose_num=1)
 
+    @unittest.skipIf(is_2021h2(), reason="tensorflow on python3.9")
     @parameterized.expand([
         ((2, 3, 4, 5), [0, 2, 3, 1]),
         ((2, 3, 4, 5, 6), [0, 2, 3, 4, 1]),
