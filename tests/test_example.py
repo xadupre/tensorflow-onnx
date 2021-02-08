@@ -4,9 +4,20 @@
 """Test examples."""
 
 import os
+import sys
 import subprocess
 import unittest
+from datetime import datetime
 from common import check_opset_min_version, check_opset_max_version, check_tf_min_version
+
+
+def is_2021h2():
+    vers = sys.version_info[:2]
+    if vers in [(3, 9), (3, 8)]:
+        now = datetime.now()
+        dt = datetime(2021, 7, 1)
+        return now < dt
+    return False
 
 
 class TestExample(unittest.TestCase):
@@ -34,6 +45,7 @@ class TestExample(unittest.TestCase):
     @check_tf_min_version("2.3", "use tf.keras")
     @check_opset_min_version(12)
     @check_opset_max_version(13)
+    @unittest.skipIf(is_2021h2(), reason="tensorflow on python3.9")
     def test_end2end_tfkeras(self):
         self.run_example(
             "end2end_tfkeras.py",

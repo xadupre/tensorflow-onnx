@@ -8,9 +8,11 @@ from __future__ import print_function
 from __future__ import unicode_literals
 
 import os
+import sys
 import unittest
 from distutils.version import LooseVersion
 from itertools import product
+from datetime import datetime
 
 import numpy as np
 from numpy.testing import assert_almost_equal
@@ -171,6 +173,15 @@ def get_maxpoolwithargmax_getdata():
     ]
     for idx, v in enumerate(data):
         yield (idx,) + v
+
+
+def is_2021h2():
+    vers = sys.version_info[:2]
+    if vers in [(3, 9), (3, 8)]:
+        now = datetime.now()
+        dt = datetime(2021, 7, 1)
+        return now < dt
+    return False
 
 
 class BackendTests(Tf2OnnxBackendTestBase):
@@ -1548,6 +1559,7 @@ class BackendTests(Tf2OnnxBackendTestBase):
 
     @check_opset_min_version(9, "OneHot")
     @check_tf_min_version("2.3", "needs tf 2.3")
+    @unittest.skipIf(is_2021h2(), reason="tensorflow on python3.9")
     def test_unsorted_segment_ops(self):
         tf_ops = [
             tf.math.unsorted_segment_max,
