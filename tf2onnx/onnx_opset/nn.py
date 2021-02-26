@@ -12,7 +12,7 @@ from __future__ import unicode_literals
 import logging
 
 import numpy as np
-from onnx import onnx_pb
+from onnx import onnx_pb, helper
 from onnx.onnx_pb import TensorProto
 from tf2onnx import constants, utils
 from tf2onnx.graph_builder import GraphBuilder
@@ -623,6 +623,18 @@ class PoolOp:
         else:
             spatial = 2
 
+        origin_dtype = ctx.get_dtype(node.output[0])
+        if origin_dtype not in [onnx_pb.TensorProto.FLOAT16, onnx_pb.TensorProto.FLOAT, onnx_pb.TensorProto.DOUBLE]:
+            # the onnx spec doesn't allow int types for pool ops
+            input_shapes = [ctx.get_shape(node.input[0])]
+            output_shapes = [ctx.get_shape(node.output[0])]
+            cast_node = ctx.make_node("Cast", [node.input[0]], dtypes=[onnx_pb.TensorProto.FLOAT], shapes=input_shapes,
+                                      name=node.name + "_cast", attr={"to": onnx_pb.TensorProto.FLOAT})
+            _ = ctx.insert_node_on_output(cast_node, node.inputs[0].output[0])
+            cast_back_node = ctx.make_node("Cast", [node.output[0]], dtypes=[origin_dtype], shapes=output_shapes,
+                                           name=node.name + "_castback", attr={"to": origin_dtype})
+            _ = ctx.insert_node_on_output(cast_back_node, node.output[0])
+
         if len(node.input) < 3:
             kernel_shape_tf = node.get_attr("ksize").ints
             strides_tf = node.get_attr("strides").ints
@@ -780,6 +792,21 @@ class BatchNorm:
         # output: y, mean, var, savedmean, savedvar,
         # detach unused outputs. While we could let the unused outputs dangle,
         # some runtimes like pytorch/caffe2 do complain about it.
+
+        # onnx batchnorm requires same T for all inputs
+        mean_type = ctx.get_dtype(node.input[3])
+        x_dtype = ctx.get_dtype(node.input[0])
+        if x_dtype != mean_type:
+            # TODO: this works but more efficient would be to flip the other inputs. We'd need to check
+            # TODO: first if this works with the onnx implementation so its a later for now
+            ctx.insert_new_node_on_input(node, "Cast", node.input[0], to=mean_type)
+            # casting the input[0] will change the output dtype of bn so we need to cast back
+            cast_back_node = ctx.insert_new_node_on_output("Cast", node.output[0],
+                                                           name=utils.make_name(node.name) + "_castback",
+                                                           to=x_dtype)
+            ctx.set_dtype(cast_back_node.output[0], x_dtype)
+            ctx.copy_shape(node.name, cast_back_node.output[0])
+
         consumers = [ctx.find_output_consumers(output_name) for output_name in node.output[1:]]
         if not any(consumers):
             new_output = [node.output[0]]
@@ -1119,16 +1146,67 @@ class Resize:
                       name=node.name, outputs=node.output, shapes=shapes, dtypes=dtypes)
 
 
+@tf_op("AdjustContrastv2")
+class AdjustContrastv2:
+    @classmethod
+    def version_1(cls, ctx, node, **kwargs):
+        images, contrast_factor = node.input
+        dtype = ctx.get_dtype(images)
+        if ctx.get_dtype(contrast_factor) != dtype:
+            contrast_factor = ctx.make_node("Cast", [dtype], attr={'to': dtype}).output[0]
+        rank = ctx.get_rank(images)
+        utils.make_sure(rank is not None, "AdjustContrastv2 requires input of known rank")
+        # Reduce everything except channels
+        axes_to_reduce = list(range(rank))[:-1]
+        mean = ctx.make_node("ReduceMean", [images], attr={'axes': axes_to_reduce, 'keepdims': True},
+                             op_name_scope=node.name).output[0]
+        diff = ctx.make_node("Sub", [images, mean], op_name_scope=node.name).output[0]
+        scaled = ctx.make_node("Mul", [diff, contrast_factor], op_name_scope=node.name).output[0]
+        result = ctx.make_node("Add", [scaled, mean], op_name_scope=node.name).output[0]
+        ctx.replace_all_inputs(node.output[0], result)
+        ctx.remove_node(node.name)
+
+
+@tf_op("AdjustSaturation")
+class AdjustSaturation:
+    @classmethod
+    def version_11(cls, ctx, node, **kwargs):
+        images, factor = node.input
+        dtype = ctx.get_dtype(images)
+        np_dtype = utils.map_onnx_to_numpy_type(dtype)
+        k = ctx.make_const(utils.make_name("three"), np.array([3], np.int64)).output[0]
+        ordered, indices = ctx.make_node("TopK", [images, k], attr={'axis': -1}, output_count=2).output
+        # Sorted and separated into channels
+        max_c, mid_c, min_c = ctx.make_node("Split", [ordered], attr={'axis': -1}, output_count=3).output
+        delta = ctx.make_node("Sub", [max_c, min_c]).output[0]
+        scaled_delta = ctx.make_node("Mul", [delta, factor], op_name_scope=node.name).output[0]
+        new_delta = ctx.make_node("Min", [scaled_delta, max_c]).output[0]
+        new_min = ctx.make_node("Sub", [max_c, new_delta]).output[0]
+        delta2 = ctx.make_node("Sub", [mid_c, min_c]).output[0]
+        const_zero = ctx.make_const(utils.make_name("zero"), np.array(0, np_dtype)).output[0]
+        delta_z = ctx.make_node("Equal", [delta, const_zero]).output[0]
+        delta_z_cast = ctx.make_node("Cast", [delta_z], attr={'to': dtype}).output[0]
+        delta_nz = ctx.make_node("Add", [delta, delta_z_cast]).output[0]
+        delta2_scale = ctx.make_node("Div", [new_delta, delta_nz]).output[0]
+        new_delta2 = ctx.make_node("Mul", [delta2, delta2_scale], op_name_scope=node.name).output[0]
+        new_mid = ctx.make_node("Add", [new_min, new_delta2]).output[0]
+        new_ordered = ctx.make_node("Concat", [max_c, new_mid, new_min], attr={'axis': -1}).output[0]
+        # Now put it back in order
+        result = ctx.make_node("GatherElements", [new_ordered, indices], attr={'axis': -1}).output[0]
+        ctx.replace_all_inputs(node.output[0], result)
+        ctx.remove_node(node.name)
+
+
 @tf_op("MatrixBandPart")
 class MatrixBandPart:
     @classmethod
-    def any_version_after7(cls, opset, ctx, node, **kwargs):
+    def version_7(cls, ctx, node, **kwargs):
         # T output = MatrixBandPart(T input, int num_lower, int num_upper)
         # data-flow: first generate mask matrix and then use element-wise mul op
         input_rank = len(ctx.get_shape(node.input[0]))
         utils.make_sure(input_rank == 2, error_msg="MatrixBandPart op: only rank 2 is supported")
         bandpart = [node.inputs[ind].get_tensor_value() for ind in [1, 2]]
-        utils.make_sure(bandpart in [[-1, 0], [0, -1]], "only support Lower/Upper triangular for now")
+        utils.make_sure(bandpart in [[-1, 0], [0, -1]], "only support Lower/Upper triangular for opset < 11")
         # methods to generate mask matrix: if lower triangular is needed, then generate column one by one
         # otherwise row is generated one by one.
         axis, counter_axis, squeeze_axis = (1, 0, 2) if bandpart == [-1, 0] else (0, 1, 1)
@@ -1201,13 +1279,77 @@ class MatrixBandPart:
                       dtypes=dtypes)
 
     @classmethod
-    def version_7(cls, ctx, node, **kwargs):
-        cls.any_version_after7(7, ctx, node, **kwargs)
+    def version_11(cls, ctx, node, **kwargs):
+        num_lower_const = node.inputs[1].get_tensor_value() if node.inputs[1].is_const() else None
+        num_upper_const = node.inputs[2].get_tensor_value() if node.inputs[2].is_const() else None
+        data, num_lower, num_upper = node.input
+        rank = ctx.get_rank(data)
+        int_max_val = utils.get_max_value(np.int64)
+        dtype = ctx.get_dtype(data)
+        if rank == 2:
+            shape = ctx.make_node("Shape", [data]).output[0]
+        else:
+            whole_shape = ctx.make_node("Shape", [data]).output[0]
+            shape = GraphBuilder(ctx).make_slice(
+                {'data': whole_shape, 'starts': [-2], 'ends': [int_max_val], 'axes': [0]})
+        if num_lower_const == 0 and num_upper_const == 0:
+            if rank == 2:
+                identity_node = ctx.make_node("EyeLike", [data]).output[0]
+            else:
+                zero_tensor = helper.make_tensor("value", dtype, dims=[1], vals=[0])
+                const_of_shape = ctx.make_node("ConstantOfShape", [shape], attr={'value': zero_tensor}).output[0]
+                identity_node = ctx.make_node("EyeLike", [const_of_shape]).output[0]
+            shapes = node.output_shapes
+            dtypes = node.output_dtypes
+            ctx.remove_node(node.name)
+            ctx.make_node(op_type="Mul", inputs=[identity_node, data],
+                          name=node.name, outputs=node.output, shapes=shapes,
+                          dtypes=dtypes)
+            return
+        zero_const = ctx.make_const(utils.make_name("zero"), np.array(0, np.int64)).output[0]
+        one_const = ctx.make_const(utils.make_name("one"), np.array(1, np.int64)).output[0]
+        conditions = []
+        row_cnt = GraphBuilder(ctx).make_slice({'data': shape, 'axes': [0], 'starts': [0], 'ends': [1]})
+        col_cnt = GraphBuilder(ctx).make_slice({'data': shape, 'axes': [0], 'starts': [1], 'ends': [2]})
+        limit = ctx.make_node("Mul", [row_cnt, col_cnt]).output[0]
+        # idx_cnt = ctx.make_node("Range", [zero_const, limit, one_const]).output[0]
 
-    @classmethod
-    def version_13(cls, ctx, node, **kwargs):
-        # Signature of operator Squeeze changed.
-        cls.any_version_after7(13, ctx, node, **kwargs)
+        ones_of_shape = ctx.make_node("Expand", [one_const, limit]).output[0]
+        idx_cnt = ctx.make_node("CumSum", [ones_of_shape, zero_const], attr={'exclusive': True}).output[0]
+
+        idx_reshape = ctx.make_node("Reshape", [idx_cnt, shape]).output[0]
+        row_idx = ctx.make_node("Div", [idx_reshape, col_cnt]).output[0]
+        col_idx = ctx.make_node("Mod", [idx_reshape, col_cnt]).output[0]
+        idx_diff = ctx.make_node("Sub", [col_idx, row_idx]).output[0]
+
+        if num_upper_const is None or num_upper_const >= 0:
+            if ctx.get_dtype(num_upper) != TensorProto.INT64:
+                num_upper = ctx.make_node("Cast", [num_upper], attr={'to': TensorProto.INT64}).output[0]
+            greater = ctx.make_node("Greater", [idx_diff, num_upper]).output[0]
+            less_or_equal = ctx.make_node("Not", [greater]).output[0]
+            conditions.append(less_or_equal)
+        if num_lower_const is None or num_lower_const >= 0:
+            if ctx.get_dtype(num_lower) != TensorProto.INT64:
+                num_lower = ctx.make_node("Cast", [num_lower], attr={'to': TensorProto.INT64}).output[0]
+            num_lower_neg = ctx.make_node("Neg", [num_lower]).output[0]
+            greater = ctx.make_node("Greater", [num_lower_neg, idx_diff]).output[0]
+            less_or_equal = ctx.make_node("Not", [greater]).output[0]
+            conditions.append(less_or_equal)
+        if len(conditions) == 0:
+            node.type = "Identity"
+            ctx.replace_inputs(node, [data])
+            return
+        if len(conditions) == 1:
+            cond = conditions[0]
+        if len(conditions) == 2:
+            cond = ctx.make_node("And", conditions).output[0]
+        mask = ctx.make_node("Cast", [cond], attr={'to': ctx.get_dtype(data)}).output[0]
+        shapes = node.output_shapes
+        dtypes = node.output_dtypes
+        ctx.remove_node(node.name)
+        ctx.make_node(op_type="Mul", inputs=[mask, data],
+                      name=node.name, outputs=node.output, shapes=shapes,
+                      dtypes=dtypes)
 
 
 def _make_softmax_cross_entropy_with_logits(ctx, label, logit, tf_ori_node):

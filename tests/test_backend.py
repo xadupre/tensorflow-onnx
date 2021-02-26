@@ -330,6 +330,15 @@ class BackendTests(Tf2OnnxBackendTestBase):
             self.logger.debug(str(p))
             self._run_test_case(func, [_OUTPUT], {_INPUT: x_val})
 
+    @check_tf_min_version("1.15", "required for max_pool args")
+    def test_maxpool_int(self):
+        x_shape = [8, 16, 16, 3]
+        x_val = make_xval(x_shape).astype("int32")
+        def func(x):
+            mp = tf.nn.max_pool(x, ksize=[2], strides=[1, 2, 2, 1], padding="SAME")
+            return tf.identity(mp, name=_TFOUTPUT)
+        self._run_test_case(func, [_OUTPUT], {_INPUT: x_val})
+
     @skip_tf_cpu("only tf_gpu can run maxpool with NCHW format")
     def test_maxpool_gpu(self):
         # make sure converter behaves well when data format is NCHW
@@ -921,6 +930,15 @@ class BackendTests(Tf2OnnxBackendTestBase):
             x_ = tf.roll(x, shift, axes_val)
             return tf.identity(x_, name=_TFOUTPUT)
         self._run_test_case(func, [_OUTPUT], {_INPUT: x_val, _INPUT1: shift_val})
+
+    @check_opset_min_version(10, "Slice")
+    def test_roll_neg_axis(self):
+        def func(input_ids):
+            shifted_input_ids = tf.cast(input_ids, tf.int32)
+            shifted_input_ids = tf.roll(shifted_input_ids, 1, axis=-1)
+            return tf.identity(shifted_input_ids, name=_TFOUTPUT)
+        x_val = np.array([[0, 1, 2, 3, 4, 5, 6, 7], [1, 2, 3, 4, 5, 6, 7, 8]], dtype=np.int64)
+        self._run_test_case(func, [_OUTPUT], {_INPUT: x_val})
 
     @check_tf_min_version("2.2")
     def test_large_model_format(self):
@@ -1803,16 +1821,73 @@ class BackendTests(Tf2OnnxBackendTestBase):
         # since results are random, compare the shapes only
         self._run_test_case(func, [_OUTPUT], {}, check_value=False, check_shape=True)
 
-    @unittest.skip("TF RandomUniformInt is not supported")
     def test_randomuniform_int(self):
         def func():
-            shape = tf.constant([2, 3], name="shape")
-            x_ = random_uniform(shape, name="rand", dtype=tf.int32, maxval=10)
+            shape = tf.constant([100, 3], name="shape")
+            x_ = random_uniform(shape, name="rand", dtype=tf.int32, minval=2, maxval=10)
             x_ = tf.identity(x_, name="output1")
             x_ = tf.identity(x_, name="output2")
             return tf.identity(x_, name=_TFOUTPUT)
         # since results are random, compare the shapes only
-        self._run_test_case(func, [_OUTPUT], {}, check_value=False, check_shape=True)
+        g = self._run_test_case(func, [_OUTPUT], {}, check_value=False, check_shape=True)
+        results = self.run_backend(g, [_OUTPUT], {})
+        numbers = set(results[0].flatten())
+        self.assertEqual(sorted(numbers), list(range(2, 10)))
+
+    def test_randomuniform_int_scalar(self):
+        def func():
+            shape = tf.constant(np.array([], np.int32), name="shape")
+            x_ = random_uniform(shape, name="rand", dtype=tf.int32, minval=2, maxval=10)
+            x_ = tf.identity(x_, name="output1")
+            x_ = tf.identity(x_, name="output2")
+            return tf.identity(x_, name=_TFOUTPUT)
+        # since results are random, compare the shapes only
+        g = self._run_test_case(func, [_OUTPUT], {}, check_value=False, check_shape=True)
+        results = self.run_backend(g, [_OUTPUT], {})
+        self.assertTrue(2 <= results[0] < 10)
+
+    def test_randomuniform_int_nonconst_max(self):
+        m_val = np.array(8, dtype=np.int32)
+        def func(m):
+            shape = tf.constant([100, 3], name="shape")
+            x_ = random_uniform(shape, name="rand", dtype=tf.int32, minval=0, maxval=m)
+            x_ = tf.identity(x_, name="output1")
+            x_ = tf.identity(x_, name="output2")
+            return tf.identity(x_, name=_TFOUTPUT)
+        g = self._run_test_case(func, [_OUTPUT], {_INPUT: m_val}, check_value=False, check_shape=True)
+        results = self.run_backend(g, [_OUTPUT], {_INPUT: m_val})
+        numbers = set(results[0].flatten())
+        self.assertEqual(sorted(numbers), list(range(8)))
+
+    def test_randomuniform_int_nonconst_min_max(self):
+        n_val = np.array(2, dtype=np.int32)
+        m_val = np.array(10, dtype=np.int32)
+        def func(n, m):
+            shape = tf.constant([100, 3], name="shape")
+            x_ = random_uniform(shape, name="rand", dtype=tf.int32, minval=n, maxval=m)
+            x_ = tf.identity(x_, name="output1")
+            x_ = tf.identity(x_, name="output2")
+            return tf.identity(x_, name=_TFOUTPUT)
+        g = self._run_test_case(func, [_OUTPUT], {_INPUT: n_val, _INPUT1: m_val}, check_value=False, check_shape=True)
+        results = self.run_backend(g, [_OUTPUT], {_INPUT: n_val, _INPUT1: m_val})
+        numbers = set(results[0].flatten())
+        self.assertEqual(sorted(numbers), list(range(2, 10)))
+
+    @check_opset_min_version(9, "RandomUniformLike")
+    def test_randomuniform_int_nonconst_min_max_shape(self):
+        n_val = np.array(2, dtype=np.int32)
+        m_val = np.array(10, dtype=np.int32)
+        s_val = np.array([100, 3], dtype=np.int64)
+        def func(n, m, s):
+            x_ = random_uniform(s, name="rand", dtype=tf.int32, minval=n, maxval=m)
+            x_ = tf.identity(x_, name="output1")
+            x_ = tf.identity(x_, name="output2")
+            return tf.identity(x_, name=_TFOUTPUT)
+        g = self._run_test_case(func, [_OUTPUT], {_INPUT: n_val, _INPUT1: m_val, _INPUT2: s_val},
+                                check_value=False, check_shape=True)
+        results = self.run_backend(g, [_OUTPUT], {_INPUT: n_val, _INPUT1: m_val, _INPUT2: s_val})
+        numbers = set(results[0].flatten())
+        self.assertEqual(sorted(numbers), list(range(2, 10)))
 
     @unittest.skipIf(True, reason="output is not in graph")
     @skip_caffe2_backend()
@@ -2339,6 +2414,27 @@ class BackendTests(Tf2OnnxBackendTestBase):
             return tf.identity(y, name=_TFOUTPUT)
         self._run_test_case(func, [_OUTPUT], {_INPUT: x_val}, rtol=1e-04)
 
+    @skip_tflite("tflite converts aborts")
+    @check_opset_min_version(11, "batchnorm")
+    @check_tf_min_version("2.4")
+    def test_batchnorm_mixed(self):
+        x_shape = [1, 32, 32, 2]
+        x_dtype = np.float16
+        scale_dtype = np.float32
+        scale_shape = [2]
+        x_val = np.random.random_sample(x_shape).astype(x_dtype)
+        scale_val = np.random.random_sample(scale_shape).astype(scale_dtype)
+        offset_val = np.random.random_sample(scale_shape).astype(scale_dtype)
+        mean_val = np.random.random_sample(scale_shape).astype(scale_dtype)
+        var_val = np.random.random_sample(scale_shape).astype(scale_dtype)
+        def func(x, mean, offset, var):
+            scale = tf.constant(scale_val, name='scale')
+            y = tf.raw_ops.FusedBatchNormV3(x=x, scale=scale, offset=offset, mean=mean, variance=var,
+                                            is_training=False, name=_TFOUTPUT)
+            return y
+        self._run_test_case(func, [_OUTPUT],
+                            {_INPUT: x_val, _INPUT1: mean_val, _INPUT2: offset_val, _INPUT3: var_val})
+
     @check_opset_min_version(7, "batchnorm")
     @check_tf_min_version("1.13")
     def test_batchnorm(self):
@@ -2510,6 +2606,26 @@ class BackendTests(Tf2OnnxBackendTestBase):
             x_ = resize_bilinear_v2(x, x_new_size_)
             return tf.identity(x_, name=_TFOUTPUT)
         self._run_test_case(func, [_OUTPUT], {_INPUT: x_val, _INPUT1: x_new_size})
+
+    def test_adjust_contrast(self):
+        x_shape = [4, 3, 2]
+        x_val = np.arange(1, 1 + np.prod(x_shape), dtype=np.float32).reshape(x_shape)
+        y_val = np.array(2.1, np.float32)
+        def func(x, y):
+            x_ = tf.image.adjust_contrast(x, y)
+            return tf.identity(x_, name=_TFOUTPUT)
+        self._run_test_case(func, [_OUTPUT], {_INPUT: x_val, _INPUT1: y_val})
+
+    @check_opset_min_version(11, "GatherElements")
+    def test_adjust_saturation(self):
+        x_val = np.array([[1, 2, 3], [4, 4, 4], [3, 2, 3], [3, 2, 2]], dtype=np.float32).reshape([2, 2, 3])
+        y_val = np.array(2.1, np.float32)
+        def func(x, y):
+            x_ = tf.image.adjust_saturation(x, y)
+            return tf.identity(x_, name=_TFOUTPUT)
+        self._run_test_case(func, [_OUTPUT], {_INPUT: x_val, _INPUT1: y_val})
+        y_val = np.array(0.5, np.float32)
+        self._run_test_case(func, [_OUTPUT], {_INPUT: x_val, _INPUT1: y_val})
 
     @check_tf_min_version("2.0", "Results are slightly different in tf1")
     @check_opset_min_version(11, "resize bicubic")
@@ -2838,6 +2954,36 @@ class BackendTests(Tf2OnnxBackendTestBase):
                 return tf.identity(res, name=_TFOUTPUT)
             self._run_test_case(func, [_OUTPUT], {_INPUT: x_val})
 
+    @check_tf_min_version("1.14", "tf.strings.lower")
+    @check_opset_min_version(10, "StringNormalizer")
+    def test_string_lower(self):
+        text_val1 = np.array([["a", "Test 1 2 3", "♠♣"], ["Hi there", "test test", "♥♦"]], dtype=np.str)
+        def func(text1):
+            x = tf.strings.lower(text1)
+            x_ = tf.identity(x, name=_TFOUTPUT)
+            return x_
+        self._run_test_case(func, [_OUTPUT], {_INPUT: text_val1})
+
+    @check_tf_min_version("1.14", "tf.strings.lower")
+    @check_opset_min_version(10, "StringNormalizer")
+    def test_string_lower_flat(self):
+        text_val1 = np.array(["a", "Test 1 2 3", "♠♣", "Hi there", "test test", "♥♦"], dtype=np.str)
+        def func(text1):
+            x = tf.strings.lower(text1)
+            x_ = tf.identity(x, name=_TFOUTPUT)
+            return x_
+        self._run_test_case(func, [_OUTPUT], {_INPUT: text_val1})
+
+    @check_tf_min_version("1.14", "tf.strings.lower")
+    @check_opset_min_version(10, "StringNormalizer")
+    def test_string_upper(self):
+        text_val1 = np.array([["a", "Test 1 2 3", "♠♣"], ["Hi there", "test test", "♥♦"]], dtype=np.str)
+        def func(text1):
+            x = tf.strings.upper(text1)
+            x_ = tf.identity(x, name=_TFOUTPUT)
+            return x_
+        self._run_test_case(func, [_OUTPUT], {_INPUT: text_val1})
+
     @check_opset_min_version(6, "cast")
     def test_shape_int32(self):
         x_val = np.array([[[1, 1, 1], [2, 2, 2]], [[3, 3, 3], [4, 4, 4]]], dtype=np.float32)
@@ -2916,6 +3062,35 @@ class BackendTests(Tf2OnnxBackendTestBase):
             res1 = tf.linalg.band_part(input_x, 0, -1)
             return tf.identity(res, name=_TFOUTPUT), tf.identity(res1, name=_TFOUTPUT1)
         self._run_test_case(func, [_OUTPUT, _OUTPUT1], {_INPUT: input_val})
+
+    @check_opset_min_version(11, "CumSum")
+    def test_matrix_band_part_3(self):
+        for low, high in [(-1, 3), (2, 3), (4, 3), (0, -1), (0, 0), (-1, -1)]:
+            input_val = np.random.randint(0, 666, (10, 15)).astype(np.int32)
+            def func(input_x):
+                res = tf.linalg.band_part(input_x, low, high)
+                return tf.identity(res, name=_TFOUTPUT)
+            self._run_test_case(func, [_OUTPUT], {_INPUT: input_val})
+
+    @check_opset_min_version(11, "CumSum")
+    def test_matrix_band_part_4(self):
+        for low, high in [(-1, 3), (2, 3), (4, 3), (0, -1), (0, 0)]:
+            input_val = np.random.randint(0, 666, (2, 3, 10, 15)).astype(np.int32)
+            def func(input_x):
+                res = tf.linalg.band_part(input_x, low, high)
+                return tf.identity(res, name=_TFOUTPUT)
+            self._run_test_case(func, [_OUTPUT], {_INPUT: input_val})
+
+    @check_opset_min_version(11, "CumSum")
+    def test_matrix_band_part_5(self):
+        for low_val, high_val in [(2, 3), (4, 3), (0, 0), (2, 0)]:
+            low_val = np.array(low_val, np.int32)
+            high_val = np.array(high_val, np.int32)
+            input_val = np.random.randint(0, 666, (2, 3, 10, 15)).astype(np.int32)
+            def func(input_x, low, high):
+                res = tf.linalg.band_part(input_x, low, high)
+                return tf.identity(res, name=_TFOUTPUT)
+            self._run_test_case(func, [_OUTPUT], {_INPUT: input_val, _INPUT1: low_val, _INPUT2: high_val})
 
     def test_floordiv(self):
         input_val_1 = np.random.random_sample(100).astype(np.int32)
@@ -4605,6 +4780,7 @@ class BackendTests(Tf2OnnxBackendTestBase):
 
         x_val = np.array([1, 5, 2, 0, 3, 4], dtype=np.int64)
         self._run_test_case(func, [_OUTPUT], {_INPUT: x_val})
+
 
 
 if __name__ == '__main__':

@@ -15,6 +15,7 @@ import numpy as np
 from onnx import onnx_pb, numpy_helper
 from tf2onnx import utils
 from tf2onnx.handler import tf_op
+from tf2onnx.graph_builder import GraphBuilder
 
 logger = logging.getLogger(__name__)
 
@@ -28,8 +29,33 @@ class DirectOp:
         pass
 
 
-@tf_op(["RandomNormal", "RandomUniform"])
+@tf_op(["RandomNormal", "RandomUniform", "RandomUniformInt"])
 class RandomOp:
+    @classmethod
+    def randuniform_int(cls, ctx, rand_node, rand_out, min_inp, max_inp):
+        dtype = ctx.get_dtype(rand_out)
+        min_node = ctx.get_node_by_output(min_inp)
+        max_node = ctx.get_node_by_output(max_inp)
+        if min_node.is_const() and max_node.is_const():
+            rand_node.set_attr('low', float(min_node.get_tensor_value()))
+            rand_node.set_attr('high', float(max_node.get_tensor_value()))
+            out = rand_out
+        elif min_node.is_const() and min_node.get_tensor_value() == 0:
+            max_float = ctx.make_node("Cast", [max_inp], attr={'to': onnx_pb.TensorProto.FLOAT}).output[0]
+            mul_node = ctx.insert_new_node_on_output("Mul", rand_out, inputs=[rand_out, max_float])
+            out = mul_node.output[0]
+        else:
+            min_float = ctx.make_node("Cast", [min_inp], attr={'to': onnx_pb.TensorProto.FLOAT}).output[0]
+            max_float = ctx.make_node("Cast", [max_inp], attr={'to': onnx_pb.TensorProto.FLOAT}).output[0]
+            diff = ctx.make_node("Sub", [max_float, min_float]).output[0]
+            diff_float = ctx.make_node("Cast", [diff], attr={'to': onnx_pb.TensorProto.FLOAT}).output[0]
+            mul_node = ctx.insert_new_node_on_output("Mul", rand_out, inputs=[rand_out, diff_float])
+            mul = mul_node.output[0]
+            add_node = ctx.insert_new_node_on_output("Add", mul, inputs=[mul, min_float])
+            out = add_node.output[0]
+        floor_node = ctx.insert_new_node_on_output("Floor", out)
+        ctx.insert_new_node_on_output("Cast", floor_node.output[0], to=dtype)
+
     @classmethod
     def version_1(cls, ctx, node, **kwargs):
         # in tf-2.0 grappler optimizes the graph pretty well and our matching logic
@@ -38,11 +64,24 @@ class RandomOp:
         # const we make it an attribute.
         seed = node.get_attr("seed")
         node.set_attr("seed", float(seed.f))
-        if len(node.input) > 0 and node.inputs[0].is_const():
-            shape = node.inputs[0].get_tensor_value()
-            ctx.remove_input(node, node.input[0], 0)
+        utils.make_sure(node.inputs[0].is_const(), "%s node with non-const shape requires opset >= 9")
+        shape = node.inputs[0].get_tensor_value()
+        ctx.remove_input(node, node.input[0], 0)
+        if len(shape) == 0:
+            # ORT can't take an empty shape (scalar)
+            node.set_attr("shape", [1])
+            ctx.set_shape(node.output[0], [1])
+            squeeze_node = GraphBuilder(ctx).make_squeeze({'data': node.output[0], 'axes': [0]}, return_node=True)
+            ctx.insert_node_on_output(squeeze_node, node.output[0])
+            rand_out = squeeze_node.output[0]
+        else:
             node.set_attr("shape", shape)
             ctx.set_shape(node.output[0], shape)
+            rand_out = node.output[0]
+        if node.type == "RandomUniformInt":
+            cls.randuniform_int(ctx, node, rand_out, node.input[0], node.input[1])
+            node.type = "RandomUniform"
+            ctx.replace_inputs(node, [])
 
     @classmethod
     def version_9(cls, ctx, node, **kwargs):
@@ -51,10 +90,15 @@ class RandomOp:
         else:
             seed = node.get_attr("seed")
             node.set_attr("seed", float(seed.f))
-            cast_node = ctx.make_node("Cast", node.input, attr={'to': onnx_pb.TensorProto.INT64})
+            cast_node = ctx.make_node("Cast", [node.input[0]], attr={'to': onnx_pb.TensorProto.INT64})
             const_node = ctx.make_node("ConstantOfShape", cast_node.output)
+            inputs = node.input.copy()
             ctx.replace_inputs(node, const_node.output.copy())
-            node.type = node.type + 'Like'
+            if node.type == "RandomUniformInt":
+                cls.randuniform_int(ctx, node, node.output[0], inputs[1], inputs[2])
+                node.type = "RandomUniformLike"
+            else:
+                node.type = node.type + 'Like'
 
 
 @tf_op(["RandomNormalLike", "RandomUniformLike"])

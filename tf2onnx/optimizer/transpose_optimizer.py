@@ -191,7 +191,9 @@ class TransposeOptimizer(GraphOptimizerBase):
             "Min": self._maxmin_handler,
             "Mul": self._mul_handler,
             "Pad": self._pad_handler,
+            "Reciprocal": self._simple_through_handler,
             "ReduceMean": self._reducemean_handler,
+            "ReduceSum": self._reducesum_handler,
             "Relu": self._simple_through_handler,
             "Shape": self._shape_handler,
             "Sigmoid": self._simple_through_handler,
@@ -199,6 +201,7 @@ class TransposeOptimizer(GraphOptimizerBase):
             "Slice": self._slice_handler,
             "Split": self._split_handler,
             "Softplus": self._simple_through_handler,
+            "Sqrt": self._simple_through_handler,
             "Squeeze": self._squeeze_handler,
             "Sub": self._sub_handler,
             "Tanh": self._simple_through_handler,
@@ -458,7 +461,13 @@ class TransposeOptimizer(GraphOptimizerBase):
 
         # node's inputs may come from one same node. if so the multiplier_input_node may be none
         if multiplier_input_node is None:
-            return False
+            if not self._nodes_has_single_consumer_node([trans]):
+                return False
+            self._g.replace_all_inputs(node.output[0], trans.output[0])
+            self._g.replace_input(node, node.input[0], trans.input[0], 0)
+            self._g.replace_input(node, node.input[1], trans.input[0], 1)
+            self._g.replace_input(trans, trans.input[0], node.output[0], 0)
+            return True
 
         # convert  mul(trans(x), trans(y)) ->  trans(mul(x, y))
         if multiplier_input_node.type == "Transpose":
@@ -499,20 +508,19 @@ class TransposeOptimizer(GraphOptimizerBase):
             return self._switch_transpose_and_node(node, trans)
 
         # if multiplier is 1-D
-        if len(multiplier.shape) == 1:
-            if multiplier.shape[0] == 1:
-                # shape is (1)
-                return self._switch_transpose_and_node(node, trans)
+        if len(multiplier.shape) == 1 and multiplier.shape[0] == 1:
+            # shape is (1)
+            return self._switch_transpose_and_node(node, trans)
 
+        # if multiplier has shape (N,) or (1, N) or (1, 1, N) ....
+        if np.prod(multiplier.shape) == multiplier.shape[-1]:
             if not self._nodes_has_single_consumer_node([multiplier_input_node]):
                 new_inp = self._g.copy_const(multiplier_input_node)
                 self._g.replace_input(node, multiplier_input_id, new_inp.output[0], multiplier_input_idx)
                 multiplier_input_node = new_inp
-
-            # shape is (N). reshape so that trans(shape) = 1,1,...,N
             perm = list(trans.get_attr('perm').ints)
             new_shape = np.ones(len(perm), dtype=np.int32)
-            new_shape[perm[-1]] = multiplier.shape[0]
+            new_shape[perm[-1]] = multiplier.shape[-1]
             multiplier_input_node.set_tensor_value(multiplier.reshape(new_shape))
             return self._switch_transpose_and_node(node, trans)
 
@@ -701,6 +709,34 @@ class TransposeOptimizer(GraphOptimizerBase):
         # by default, if keepdims is not specified, it is 1
         if axes == list(range(1, trans_rank - 1)) and ((keepdims and keepdims.i == 1) or (not keepdims)):
             node.set_attr("axes", list(range(2, trans_rank)))
+            return self._switch_transpose_and_node(node, trans)
+        return False
+
+    def _reducesum_handler(self, trans, node):
+        keepdims = node.get_attr("keepdims")
+        # make sure keepdims is 1, then we can do the swap, otherwise, please don't, because
+        # once keepdims is not set, original dims are lost, so transpose back won't work well.
+        # by default, if keepdims is not specified, it is 1
+        if keepdims and keepdims.i == 0:
+            return False
+        if self._g.opset <= 12:
+            axes = node.get_attr("axes").ints
+            perm = trans.get_attr('perm').ints
+            new_axes = [perm[axis] for axis in axes]
+            node.set_attr("axes", new_axes)
+            return self._switch_transpose_and_node(node, trans)
+        if node.inputs[1].is_const():
+            axes = node.inputs[1].get_tensor_value()
+            perm = trans.get_attr('perm').ints
+            axes = [perm[axes[i]] for i in range(len(axes))]
+            new_axes = np.array(axes, dtype=np.int64)
+            if self._nodes_has_single_consumer_node([node.inputs[1]]):
+                node.inputs[1].set_tensor_value(new_axes)
+            else:
+                new_axes_const = self._g.make_const(
+                    utils.make_name(node.inputs[1].name), new_axes
+                )
+                self._g.replace_input(node, node.input[1], new_axes_const.output[0], 1)
             return self._switch_transpose_and_node(node, trans)
         return False
 
