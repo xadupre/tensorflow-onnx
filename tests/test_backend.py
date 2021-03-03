@@ -53,6 +53,8 @@ _TFOUTPUT1 = "output1"
 _OUTPUT1 = "output1:0"
 _TFOUTPUT2 = "output2"
 _OUTPUT2 = "output2:0"
+_TFOUTPUT3 = "output3"
+_OUTPUT3 = "output3:0"
 
 
 if is_tf2():
@@ -3556,6 +3558,52 @@ class BackendTests(Tf2OnnxBackendTestBase):
 
         self._run_test_case(func, [_OUTPUT, _OUTPUT1], {_INPUT: boxes_val, _INPUT1: scores_val})
 
+    @check_tf_min_version("2.3")
+    @check_opset_min_version(12, "GatherND with batch_dims")
+    def test_combined_non_max_suppression_pad_and_clip(self):
+        batch_size = 8
+        box_num = 10
+        classes_num = 2
+        max_total_size = 9
+        boxes_val = np.random.random_sample([batch_size, box_num, 1, 4]).astype(np.float32) * 2 - 0.5
+        scores_val = np.random.random_sample([batch_size, box_num, classes_num]).astype(np.float32)
+
+        def func(boxes, scores):
+            nmsed_boxes, nmsed_scores, nmsed_classes, valid_detections = \
+                tf.image.combined_non_max_suppression(boxes=boxes, scores=scores, score_threshold=0.1,
+                                                      max_output_size_per_class=3, max_total_size=max_total_size,
+                                                      iou_threshold=0.5, pad_per_class=True, clip_boxes=True)
+            out1 = tf.identity(nmsed_boxes, name=_TFOUTPUT)
+            out2 = tf.identity(nmsed_scores, name=_TFOUTPUT1)
+            out3 = tf.identity(nmsed_classes, name=_TFOUTPUT2)
+            out4 = tf.identity(valid_detections, name=_TFOUTPUT3)
+            return out1, out2, out3, out4
+
+        self._run_test_case(func, [_OUTPUT, _OUTPUT1, _OUTPUT2, _OUTPUT3], {_INPUT: boxes_val, _INPUT1: scores_val})
+
+    @check_tf_min_version("2.3")
+    @check_opset_min_version(12, "GatherND with batch_dims")
+    def test_combined_non_max_suppression_no_pad_no_clip(self):
+        batch_size = 8
+        box_num = 10
+        classes_num = 2
+        max_total_size = 9
+        boxes_val = np.random.random_sample([batch_size, box_num, 1, 4]).astype(np.float32) * 2 - 0.5
+        scores_val = np.random.random_sample([batch_size, box_num, classes_num]).astype(np.float32)
+
+        def func(boxes, scores):
+            nmsed_boxes, nmsed_scores, nmsed_classes, valid_detections = \
+                tf.image.combined_non_max_suppression(boxes=boxes, scores=scores, score_threshold=0.1,
+                                                      max_output_size_per_class=3, max_total_size=max_total_size,
+                                                      iou_threshold=0.5, pad_per_class=False, clip_boxes=False)
+            out1 = tf.identity(nmsed_boxes, name=_TFOUTPUT)
+            out2 = tf.identity(nmsed_scores, name=_TFOUTPUT1)
+            out3 = tf.identity(nmsed_classes, name=_TFOUTPUT2)
+            out4 = tf.identity(valid_detections, name=_TFOUTPUT3)
+            return out1, out2, out3, out4
+
+        self._run_test_case(func, [_OUTPUT, _OUTPUT1, _OUTPUT2, _OUTPUT3], {_INPUT: boxes_val, _INPUT1: scores_val})
+
     def _conv1d_test(self, x_val, w, stride=None, padding="VALID", rtol=1e-07):
         if stride is None:
             stride = 1
@@ -4767,6 +4815,16 @@ class BackendTests(Tf2OnnxBackendTestBase):
             return tf.identity(op_, name=_TFOUTPUT)
         with self.assertRaises(ValueError):
             self._run_test_case(func3, [_OUTPUT], {_INPUT: x_val})
+
+    @check_tf_min_version("1.14")
+    @check_opset_min_version(11, "range")
+    def test_fft_ops(self):
+        x_val = make_xval([3, 4]).astype(np.float32)
+        def func1(x):
+            xc = tf.cast(x, tf.complex64)
+            op_ = tf.signal.fft(xc)
+            return tf.abs(op_, name=_TFOUTPUT)
+        self._run_test_case(func1, [_OUTPUT], {_INPUT: x_val})
 
     @check_opset_min_version(11, "topk")
     def test_invert_permutation(self):
