@@ -20,7 +20,6 @@ os.environ["TF_CPP_MIN_LOG_LEVEL"] = "3"
 import numpy as np
 import tensorflow as tf
 from tensorflow.python.ops import variables as variables_lib
-import onnx
 from tensorflow.python.ops import lookup_ops
 from common import get_test_config
 from tf2onnx import utils
@@ -198,6 +197,10 @@ class Tf2OnnxBackendTestBase(unittest.TestCase):
             sess_outputs = [sess.graph.get_tensor_by_name(n) for n in outputs]
             converter = tf_lite.TFLiteConverter.from_session(sess, sess_inputs, sess_outputs)
             #converter.optimizations = [tf.lite.Optimize.DEFAULT]
+            converter.target_spec.supported_ops = [
+                tf.lite.OpsSet.TFLITE_BUILTINS,    # enable TensorFlow Lite ops.
+                tf.lite.OpsSet.SELECT_TF_OPS,      # enable TensorFlow flex ops.
+            ]
 
             from tensorflow.lite.python.convert import ConverterError
             try:
