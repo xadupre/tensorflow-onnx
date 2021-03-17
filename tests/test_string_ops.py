@@ -49,7 +49,7 @@ class StringOpsTests(Tf2OnnxBackendTestBase):
         text_val2 = np.array([["b", "Test 1 2 3"], ["Hi there", "suits"]], dtype=np.str)
         text_val3 = np.array("Some scalar text", dtype=np.str)
         def func(text1, text2, text3):
-            x_ = tf.strings.join([text1, text2, text3], separator="±")
+            x_ = tf.strings.join([text1, text2, text3], separator="a")
             return tf.identity(x_, name=_TFOUTPUT)
         self._run_test_case(func, [_OUTPUT], {_INPUT: text_val1, _INPUT1: text_val2, _INPUT2: text_val3})
 
