@@ -46,6 +46,17 @@ class StringOpsTests(Tf2OnnxBackendTestBase):
     @requires_custom_ops("StringJoin")
     def test_string_join(self):
         text_val1 = np.array([["a", "Test 1 2 3"], ["Hi there", "test test"]], dtype=np.str)
+        text_val2 = np.array([["b", "Test 1 2 3"], ["Hi there", "suits"]], dtype=np.str)
+        text_val3 = np.array("Some scalar text", dtype=np.str)
+        def func(text1, text2, text3):
+            x_ = tf.strings.join([text1, text2, text3], separator="±")
+            return tf.identity(x_, name=_TFOUTPUT)
+        self._run_test_case(func, [_OUTPUT], {_INPUT: text_val1, _INPUT1: text_val2, _INPUT2: text_val3})
+
+    @unittest.skipIf(True, reason="utf8 issue")
+    @requires_custom_ops("StringJoin")
+    def test_string_join_utf8(self):
+        text_val1 = np.array([["a", "Test 1 2 3"], ["Hi there", "test test"]], dtype=np.str)
         text_val2 = np.array([["b", "Test 1 2 3"], ["Hi there", "suits ♠♣♥♦"]], dtype=np.str)
         text_val3 = np.array("Some scalar text", dtype=np.str)
         def func(text1, text2, text3):
