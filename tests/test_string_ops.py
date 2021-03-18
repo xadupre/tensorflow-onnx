@@ -43,6 +43,7 @@ class StringOpsTests(Tf2OnnxBackendTestBase):
             return tf.identity(x_, name=_TFOUTPUT)
         self._run_test_case(func, [_OUTPUT], {_INPUT: text_val})
 
+    @unittest.skipIf(True, reason="still issue")
     @requires_custom_ops("StringJoin")
     def test_string_join(self):
         text_val1 = np.array([["a", "Test 1 2 3"], ["Hi there", "test test"]], dtype=np.str)
