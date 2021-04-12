@@ -117,6 +117,7 @@ class Node(object):
             external_tensor_storage.name_to_tensor_data[tensor_name] = a.t.raw_data
             external_tensor_storage.node_to_modified_value_attr[self] = a
             a.t.raw_data = b''
+            a.t.ClearField("raw_data")
             location = a.t.external_data.add()
             location.key = "location"
             location.value = tensor_name
@@ -436,7 +437,7 @@ class Node(object):
                 shape = self.graph.get_shape(name)
                 cast_node = self.graph.insert_new_node_on_input(
                     self, "Cast", name, to=tdtype)
-                self.graph.set_dtype(cast_node.output[0], [tdtype])
+                self.graph.set_dtype(cast_node.output[0], tdtype)
                 self.graph.set_shape(cast_node.output[0], shape)
                 did_cast = True
         return did_cast
@@ -802,11 +803,8 @@ class Graph(object):
                 logger.debug("Inferred dtype for [%s, type: %s] is UNDEFINED, SKIP", node.name, node.type)
             else:
                 existing_dtype = self.get_dtype(output)
-                if existing_dtype is not None and existing_dtype != dtype:
-                    if override:
-                        logger.warning("Override dtype of %s from %s to %s", output, existing_dtype, dtype)
-                    else:
-                        dtype = existing_dtype
+                if existing_dtype is not None and existing_dtype != dtype and not override:
+                    dtype = existing_dtype
                 self.set_dtype(output, dtype)
                 logger.debug("Set dtype of [%s] to %s", output, dtype)
 
@@ -814,11 +812,8 @@ class Graph(object):
                 logger.debug("Inferred shape for [%s, type: %s] is None, SKIP", node.name, node.type)
             else:
                 existing_shape = self.get_shape(output)
-                if existing_shape is not None and not utils.are_shapes_equal(existing_shape, shape):
-                    if override:
-                        logger.warning("Override shape of %s from %s to %s", output, existing_shape, shape)
-                    else:
-                        shape = existing_shape
+                if existing_shape is not None and not utils.are_shapes_equal(existing_shape, shape) and not override:
+                    shape = existing_shape
                 self.set_shape(output, shape)
                 logger.debug("Set shape of [%s] to %s", output, shape)
 
@@ -1566,11 +1561,11 @@ class GraphUtil(object):
     """Utilities for Graph manipulation."""
 
     @staticmethod
-    def optimize_graph(graph):
-        return optimizer.optimize_graph(graph)
+    def optimize_graph(graph, catch_errors=True):
+        return optimizer.optimize_graph(graph, catch_errors)
 
     @staticmethod
-    def optimize_model_proto(onnx_model_proto):
+    def optimize_model_proto(onnx_model_proto, catch_errors=True):
         """Optimize the model proto, for example: eliminating all useless Transpose pairs.
 
         Returns:
@@ -1580,7 +1575,7 @@ class GraphUtil(object):
         try:
             kwargs = GraphUtil.get_onnx_model_properties(onnx_model_proto)
             graph = GraphUtil.create_graph_from_onnx_model(onnx_model_proto)
-            graph = GraphUtil.optimize_graph(graph)
+            graph = GraphUtil.optimize_graph(graph, catch_errors)
             model_proto = graph.make_model(onnx_model_proto.graph.doc_string,
                                            graph_name=onnx_model_proto.graph.name, **kwargs)
 
@@ -1588,7 +1583,9 @@ class GraphUtil(object):
                 metadata_props = {p.key: p.value for p in onnx_model_proto.metadata_props}
                 helper.set_model_props(model_proto, metadata_props)
             return model_proto
-        except Exception:
+        except Exception as e:
+            if not catch_errors:
+                raise e
             # sometimes, onnx shape inference will fail for some reason,
             # return onnx_model_proto for this case
             logger.warning("Failed to optimize model proto", exc_info=1)

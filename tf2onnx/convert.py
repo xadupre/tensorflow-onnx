@@ -151,7 +151,7 @@ def _convert_common(frozen_graph, name="unknown", large_model=False, output_path
         if not kwargs.get("tflite_path"):
             tf.import_graph_def(frozen_graph, name='')
         g = process_tf_graph(tf_graph, const_node_values=const_node_values, **kwargs)
-        onnx_graph = optimizer.optimize_graph(g)
+        onnx_graph = optimizer.optimize_graph(g, catch_errors=not large_model)
         model_proto = onnx_graph.make_model("converted from {}".format(name),
                                             external_tensor_storage=external_tensor_storage)
     if output_path:
@@ -329,7 +329,7 @@ def from_keras(model, input_signature=None, opset=None, custom_ops=None, custom_
             frozen_graph,
             name=model.name,
             continue_on_error=True,
-            target=None,
+            target=target,
             opset=opset,
             custom_op_handlers=custom_ops,
             extra_opset=extra_opset,
@@ -388,7 +388,7 @@ def from_function(function, input_signature=None, opset=None, custom_ops=None, c
             frozen_graph,
             name=concrete_func.name,
             continue_on_error=True,
-            target=None,
+            target=target,
             opset=opset,
             custom_op_handlers=custom_ops,
             extra_opset=extra_opset,
@@ -447,7 +447,7 @@ def from_graph_def(graph_def, name=None, input_names=None, output_names=None, op
         frozen_graph,
         name=name,
         continue_on_error=True,
-        target=None,
+        target=target,
         opset=opset,
         custom_op_handlers=custom_ops,
         extra_opset=extra_opset,

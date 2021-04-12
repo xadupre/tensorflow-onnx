@@ -56,6 +56,7 @@ def _wrap_concat_with_cast(ctx, node):
                                                         to=dtype)
             ctx.set_dtype(output_cast.output[0], dtype)
             ctx.copy_shape(output_name, output_cast.output[0])
+        ctx.set_dtype(node.output[0], onnx_pb.TensorProto.FLOAT)
 
 
 @tf_op("Size")
@@ -173,8 +174,7 @@ class Reshape:
             return
 
         # onnx < opset 8 does not know reshape for other types than float*, wrap the reshape in casts
-        input_cast = ctx.insert_new_node_on_input(node, "Cast", node.input[0], to=onnx_pb.TensorProto.FLOAT)
-        ctx.copy_shape(node.output[0], input_cast.output[0])
+        ctx.insert_new_node_on_input(node, "Cast", node.input[0], to=onnx_pb.TensorProto.FLOAT)
 
         # if the next node is already a cast we don't need to insert another one
         next_nodes = ctx.find_output_consumers(node.output[0])
@@ -183,6 +183,7 @@ class Reshape:
                                                         to=dtype)
             ctx.set_dtype(output_cast.output[0], dtype)
             ctx.copy_shape(node.output[0], output_cast.output[0])
+        ctx.set_dtype(node.output[0], onnx_pb.TensorProto.FLOAT)
 
 
 @tf_op("Squeeze")
@@ -855,14 +856,15 @@ class StridedSlice:
             # insert_new_node_on_output(self, op_type, output_name=None, name=None, inputs=None, domain=None, **kwargs)
             # ctx.insert_new_node_on_output("Squeeze", node.output[0], name)
             name = utils.make_name(node.name)
+            shape = ctx.get_shape(node.output[0])
+            dtype = ctx.get_dtype(node.output[0])
             squeeze_node = GraphBuilder(ctx).make_squeeze(
-                {"axes": needs_squeeze, 'data': node.output[0]}, name=name, return_node=True)
+                {"axes": needs_squeeze, 'data': node.output[0]}, name=name,
+                dtypes=[dtype], shapes=[shape], return_node=True)
             ctx.insert_node_on_output(squeeze_node)
 
             nodes.append(squeeze_node)
-            input_dtype = ctx.get_dtype(node.output[0])
-            ctx.set_dtype(squeeze_node.output[0], input_dtype)
-            ctx.copy_shape(node.output[0], squeeze_node.output[0])
+            ctx.update_node_shape_dtype(node, override=True)
 
         # onnx slice as of opset 7 does only take float tensors ... cast if needed
         input_dtype = ctx.get_dtype(node.input[0])
@@ -885,6 +887,7 @@ class StridedSlice:
                 ctx.set_dtype(cast_node.output[0], input_dtype)
                 ctx.copy_shape(node.output[0], cast_node.output[0])
                 nodes.append(cast_node)
+            ctx.set_dtype(node.output[0], onnx_pb.TensorProto.FLOAT)
 
     @classmethod
     def any_version_after10(cls, opset, ctx, node, **kwargs):
@@ -1170,6 +1173,7 @@ class TopKV2:
         cast_out = ctx.insert_new_node_on_output("Cast", node.output[1], name=utils.make_name(node.name), to=dtypes[1])
         ctx.set_dtype(cast_out.output[0], dtypes[1])
         ctx.copy_shape(node.output[1], cast_out.output[0])
+        ctx.set_dtype(node.output[1], onnx_pb.TensorProto.INT64)
 
     @classmethod
     def version_10(cls, ctx, node, **kwargs):
@@ -1263,10 +1267,11 @@ class Unpack:
             ctx.insert_node_on_output(squeeze_node, n)
 
         # split node is 1 rank higher than squeeze nodes
-        output_shape = ctx.get_shape(node.output[0])
-        if output_shape:
-            split_shape = output_shape[:axis] + [1] + output_shape[axis:]
-            ctx.set_shape(node.output[0], split_shape)
+        for out in node.output:
+            output_shape = ctx.get_shape(out)
+            if output_shape:
+                split_shape = output_shape[:axis] + [1] + output_shape[axis:]
+                ctx.set_shape(out, split_shape)
 
 
 @tf_op("OneHot")
@@ -1377,6 +1382,7 @@ class Shape:
         op_name = utils.make_name(node.name)
         output_cast = ctx.insert_new_node_on_output("Cast", node.output[0], name=op_name, to=dtype)
         ctx.set_dtype(output_cast.output[0], dtype)
+        ctx.set_dtype(node.output[0], onnx_pb.TensorProto.INT64)
         ctx.copy_shape(node.output[0], output_cast.output[0])
 
 
@@ -2028,6 +2034,10 @@ class ReverseSequence:
         if time_major:
             # get back to time_major
             op_name = utils.make_name(node.name)
+            curr_shape = ctx.get_shape(node.output[0])
+            if curr_shape is not None:
+                new_shape = [curr_shape[perm_val.index(i)] for i in range(len(perm_val))]
+                ctx.set_shape(node.output[0], new_shape)
             trans_back_node = ctx.insert_new_node_on_output("Transpose", node.output[0],
                                                             name=op_name, perm=perm_val)
             ctx.copy_dtype(node.output[0], trans_back_node.output[0])
@@ -2916,7 +2926,7 @@ class MatrixDiagPartV2V3:
         abs_k = body_graph.make_node('Abs', [current_k.output[0]])
 
         range_k = body_graph.make_node('Range', [abs_k.output[0], new_width.output[0], one],
-                                       domain="com.microsoft")
+                                       domain="com.microsoft", dtypes=[TensorProto.INT64])
         sliced_range = body_graph.make_node('Slice', [range_k.output[0], zeo, new_depth.output[0]])
         sliced_shape = body_graph.make_node('Shape', [sliced_range.output[0]])
         pad_length = body_graph.make_node('Sub', [new_depth.output[0], sliced_shape.output[0]])
@@ -3328,10 +3338,10 @@ class MatrixDiag:
                 def rowsetcolset():
                     # if col is set
                     gg = g.create_new_graph_with_same_config()
+                    gg.parent_graph = g
                     id_row = mknode2(gg, "Identity", [row])
                     id_col = mknode2(gg, "Identity", [col])
                     shape = mknode2(gg, "Concat", [id_row, id_col], attr={"axis": -1})
-                    gg.parent_graph = g
                     gg.add_graph_output(shape, TensorProto.INT64, [-1])
                     return gg
 
@@ -3602,18 +3612,21 @@ class MatrixSetDiagV3:
         ones = mknode("Add", [zeos, one])
 
         # make diag of 1s
-        ones_diag = ctx.make_node("MatrixDiagPartV3", [ones, k, zeo], attr)
+        ones_diag = ctx.make_node("MatrixDiagPartV3", [ones, k, zeo], attr,
+                                  shapes=[ctx.get_shape(x)], dtypes=[ctx.get_dtype(x)])
         MatrixDiagPartV2V3.version_11(ctx, ones_diag)
         # MatrixDiagPartV2V3.version_12(ctx, ones_diag) # todo: fix exception
 
         # make matrix of bool
         ctx.set_dtype(ones_diag.output[0], TensorProto.INT64)
-        ones_matrix = ctx.make_node("MatrixDiagV3", [ones_diag.output[0], k, row, col, zeo], attr)
+        ones_matrix = ctx.make_node("MatrixDiagV3", [ones_diag.output[0], k, row, col, zeo], attr,
+                                    shapes=[ctx.get_shape(x)], dtypes=[ctx.get_dtype(x)])
         MatrixDiag.version_12(ctx, ones_matrix)
         ones_bool = mknode("Equal", [ones_matrix.output[0], one])
 
         # make matrix out of diag
-        diag_matrix = ctx.make_node("MatrixDiagV3", [diag, k, row, col, cast(zeo)], attr)
+        diag_matrix = ctx.make_node("MatrixDiagV3", [diag, k, row, col, cast(zeo)], attr,
+                                    shapes=[ctx.get_shape(x)], dtypes=[ctx.get_dtype(x)])
         MatrixDiag.version_12(ctx, diag_matrix)
 
         shapes = node.output_shapes
