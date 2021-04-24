@@ -30,6 +30,7 @@ from tf2onnx.tf_loader import tf_reset_default_graph, tf_session, tf_placeholder
 from tf2onnx.tf_loader import tf_optimize, is_tf2, get_hash_table_info
 from tf2onnx.tf_utils import compress_graph_def
 from tf2onnx.graph import ExternalTensorStorage
+from tf2onnx.tflite.Model import Model
 
 
 if is_tf2():
@@ -109,7 +110,8 @@ class Tf2OnnxBackendTestBase(unittest.TestCase):
         for expected_val, actual_val in zip(expected, actual):
             if check_value:
                 if expected_val.dtype == np.object:
-                    decode = np.vectorize(lambda x: x.decode('UTF-8'))
+                    # TFLite pads strings with nul bytes
+                    decode = np.vectorize(lambda x: x.replace(b'\x00', b'').decode('UTF-8'))
                     expected_val_str = decode(expected_val)
                     self.assertAllEqual(expected_val_str, actual_val)
                 else:
@@ -216,6 +218,22 @@ class Tf2OnnxBackendTestBase(unittest.TestCase):
             except ConverterError:
                 return None
 
+    def tflite_has_supported_types(self, tflite_path):
+        try:
+            with open(tflite_path, 'rb') as f:
+                buf = f.read()
+            buf = bytearray(buf)
+            model = Model.GetRootAsModel(buf, 0)
+            tensor_cnt = model.Subgraphs(0).TensorsLength()
+            interpreter = tf.lite.Interpreter(tflite_path)
+            for i in range(tensor_cnt):
+                dtype = interpreter._get_tensor_details(i)['dtype']   # pylint: disable=protected-access
+                if np.dtype(dtype).kind == 'O':
+                    return False
+            return True
+        except (RuntimeError, ValueError):
+            return False
+
     def run_tflite(self, tflite_path, feed_dict):
         try:
             interpreter = tf.lite.Interpreter(tflite_path)
@@ -249,6 +267,8 @@ class Tf2OnnxBackendTestBase(unittest.TestCase):
                 return None
             return [d.dim_value if d.HasField('dim_value') else -1 for d in info.type.tensor_type.shape.dim]
         for info in model_shapes.graph.value_info:
+            if info.name == "":
+                continue
             onnx_shape = get_shape(info)
             tf2onnx_shape = graph.get_shape(info.name)
             if onnx_shape is None:
@@ -290,7 +310,7 @@ class Tf2OnnxBackendTestBase(unittest.TestCase):
 
         if test_tflite:
             tflite_path = self.convert_to_tflite(graph_def, feed_dict, output_names_with_port)
-            test_tflite = tflite_path is not None
+            test_tflite = tflite_path is not None and self.tflite_has_supported_types(tflite_path)
 
         if test_tf:
             tf_reset_default_graph()

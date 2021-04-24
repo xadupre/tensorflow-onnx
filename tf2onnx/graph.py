@@ -691,6 +691,8 @@ class Graph(object):
             self.inputs.remove(node)
 
         for op_output in node.output:
+            if op_output == "":
+                continue
             del self._output_to_node_name[op_output]
 
             if op_output in self._output_shapes:
@@ -699,6 +701,8 @@ class Graph(object):
                 del self._dtypes[op_output]
 
         for op_input in node.input:
+            if op_input == "":
+                continue
             utils.make_sure(
                 op_input in self._output_to_consumers,
                 "Input %r of node %r not found.", op_input, node_name)
@@ -863,6 +867,12 @@ class Graph(object):
             self._output_to_node_name[op_output] = node.name
         for name in node.input:
             self._register_input_name(name, node)
+
+    def is_const(self, output):
+        return self.get_node_by_output(output).is_const()
+
+    def get_tensor_value(self, output, as_list=True):
+        return self.get_node_by_output(output).get_tensor_value(as_list)
 
     def change_node_name(self, node, new_name):
         """Remove node in current graph."""
@@ -1565,11 +1575,11 @@ class GraphUtil(object):
         return optimizer.optimize_graph(graph, catch_errors)
 
     @staticmethod
-    def optimize_model_proto(onnx_model_proto, catch_errors=True):
+    def optimize_model_proto(onnx_model_proto, catch_errors=True, return_graph=False):
         """Optimize the model proto, for example: eliminating all useless Transpose pairs.
 
         Returns:
-            model proto after optimization, if optimizer run successfully
+            model proto (and possibly graph) after optimization, if optimizer run successfully
             or onnx_model_proto, if exceptions happens
         """
         try:
@@ -1582,6 +1592,8 @@ class GraphUtil(object):
             if onnx_model_proto.metadata_props:
                 metadata_props = {p.key: p.value for p in onnx_model_proto.metadata_props}
                 helper.set_model_props(model_proto, metadata_props)
+            if return_graph:
+                return model_proto, graph
             return model_proto
         except Exception as e:
             if not catch_errors:
@@ -1589,6 +1601,8 @@ class GraphUtil(object):
             # sometimes, onnx shape inference will fail for some reason,
             # return onnx_model_proto for this case
             logger.warning("Failed to optimize model proto", exc_info=1)
+            if return_graph:
+                return onnx_model_proto, None
             return onnx_model_proto
 
     @staticmethod
