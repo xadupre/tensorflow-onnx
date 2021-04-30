@@ -849,8 +849,11 @@ class StridedSlice:
         attr = {"starts": new_begin, "ends": new_end, "axes": axes}
         inputs_map = {"data": node.input[0], **attr}
         kwargs = {**inputs_map, "outputs": node.output}
-        node = GraphBuilder(ctx).make_slice(
-            kwargs, name=node.name, dtypes=out_dtypes, shapes=out_shapes, return_node=True)
+        if len(axes) > 0:
+            node = GraphBuilder(ctx).make_slice(
+                kwargs, name=node.name, dtypes=out_dtypes, shapes=out_shapes, return_node=True)
+        else:
+            node = ctx.make_node("Identity", [node.input[0]], name=node.name, dtypes=out_dtypes, shapes=out_shapes)
         nodes = [node]
         if needs_squeeze:
             # insert_new_node_on_output(self, op_type, output_name=None, name=None, inputs=None, domain=None, **kwargs)
@@ -1842,7 +1845,7 @@ class NonMaxSuppression:
 @tf_op(["CombinedNonMaxSuppression"])
 class CombinedNonMaxSuppression:
     @classmethod
-    def version_10(cls, ctx, node, **kwargs):
+    def version_12(cls, ctx, node, **kwargs):
         # boxes.shape = [batch_size, num_boxes, (1 OR num_classes), 4]
         # scores.shape = [batch_size, num_boxes, num_classes]
         boxes, scores, max_per_class, max_total_size, iou_threshold, score_threshold = node.input
