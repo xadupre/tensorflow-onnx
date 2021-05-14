@@ -3,11 +3,6 @@
 
 """Tool to convert and test pre-trained tensorflow models."""
 
-from __future__ import absolute_import
-from __future__ import division
-from __future__ import print_function
-from __future__ import unicode_literals
-
 # pylint: disable=broad-except,logging-not-lazy,unused-argument,unnecessary-lambda,import-outside-toplevel
 # pylint: disable=wrong-import-position,too-many-nested-blocks
 
@@ -330,7 +325,7 @@ class Test(object):
         logger.info("Model saved to %s", model_path)
         opt = rt.SessionOptions()
         if self.use_custom_ops:
-            from ortcustomops import get_library_path
+            from onnxruntime_extensions import get_library_path
             opt.register_custom_ops_library(get_library_path())
             m = rt.InferenceSession(model_path, opt)
         if self.ort_profile is not None:

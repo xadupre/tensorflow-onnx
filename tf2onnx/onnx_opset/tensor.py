@@ -5,10 +5,6 @@
 tensor
 """
 
-from __future__ import division
-from __future__ import print_function
-from __future__ import unicode_literals
-
 import logging
 import sys
 
@@ -136,6 +132,13 @@ class IdentityN:
         ctx.remove_node(node.name)
         for input_name, output_name in zip(node.input, node.output):
             ctx.replace_all_inputs(output_name, input_name)  # ops=ctx.get_nodes()
+
+
+@tf_op("EnsureShape")
+class EnsureShape:
+    @classmethod
+    def version_1(cls, ctx, node, **kwargs):
+        node.type = "Identity"
 
 
 @tf_op("Reshape")
