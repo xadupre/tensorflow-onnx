@@ -3,6 +3,7 @@
 
 """Unit Tests for optimizers such as TransposeOptimizer."""
 
+import sys
 import unittest
 from datetime import datetime
 import numpy as np
