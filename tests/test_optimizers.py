@@ -69,7 +69,7 @@ class OptimizerTests(Tf2OnnxBackendTestBase):
                 name=output_name,
                 data_type=utils.map_numpy_to_onnx_dtype(np_val.dtype),
                 dims=np_val.shape,
-                vals=np_val.flatten().astype(np_val.dtype if np_val.dtype != np.bool_ else np.int32),
+                vals=np_val.flatten().astype(np_val.dtype).tolist(),
             ),
         )
         return node
@@ -1526,7 +1526,7 @@ class OptimizerTests(Tf2OnnxBackendTestBase):
                 name='iterate_num_value',
                 data_type=TensorProto.INT64,
                 dims=iter_num_value.shape,
-                vals=iter_num_value.flatten().astype(np.int64),
+                vals=iter_num_value.flatten().astype(np.int64).tolist(),
             ),
         )
 
@@ -1539,7 +1539,7 @@ class OptimizerTests(Tf2OnnxBackendTestBase):
                 name='cond_value',
                 data_type=TensorProto.BOOL,
                 dims=iter_num_value.shape,
-                vals=cond_value.flatten().astype(np.int32),
+                vals=cond_value.flatten().astype(np.bool).tolist(),
             ),
         )
 
@@ -1910,6 +1910,28 @@ class OptimizerTests(Tf2OnnxBackendTestBase):
         self.run_transpose_compare(["res"], {},
                                    model_proto, remaining_transpose_num=0)
 
+    def test_const_fold_concat(self):
+        shape = (6, 4)
+        const_tensor = helper.make_tensor(name='const_tensor', data_type=TensorProto.FLOAT, dims=shape,
+                                          vals=np.random.randn(*shape).flatten().astype(np.float32))
+        const_tensor2 = helper.make_tensor(name='const_tensor2', data_type=TensorProto.FLOAT, dims=shape,
+                                           vals=np.random.randn(*shape).flatten().astype(np.float32))
+        node1 = helper.make_node("Constant", [], ["const"], value=const_tensor)
+        node2 = helper.make_node("Constant", [], ["const2"], value=const_tensor2)
+        node3 = helper.make_node("Concat", ["const", "const2", "const"], ["value1"], axis=1)
+        node4 = helper.make_node("Add", ["value1", "inp"], ["res"])
+
+        graph = helper.make_graph(
+            [node1, node2, node3, node4],
+            "test_const_fold_trans_with_const2",
+            [helper.make_tensor_value_info("inp", TensorProto.FLOAT, [6, 12])],
+            [helper.make_tensor_value_info("res", TensorProto.FLOAT, [6, 12])],
+        )
+
+        model_proto = self.make_model(graph, producer_name="onnx-tests")
+        self.run_and_compare(["res"], {"inp": np.random.randn(6, 12).astype(np.float32)}, model_proto,
+                             "Concat", 0)
+
     @check_opset_max_version(12, "Squeeze/Unsqueeze changed in opset 13")
     def test_const_fold_unsqueeze_with_const(self):
         shape = (6, 6)
@@ -1969,6 +1991,87 @@ class OptimizerTests(Tf2OnnxBackendTestBase):
         model_proto = self.make_model(graph, producer_name="onnx-tests")
         self.run_and_compare(["res"], {"X": np.random.randn(*shape).astype(np.int64)}, model_proto,
                              "Cast", 0)
+
+    def test_const_fold_split(self):
+        shape = (2, 6, 1)
+        const_tensor = helper.make_tensor(name='const_tensor', data_type=TensorProto.FLOAT, dims=shape,
+                                          vals=np.random.randn(2, 6, 1).flatten().astype(np.float32))
+        node0 = helper.make_node("Constant", [], ["const"], value=const_tensor)
+        node1 = helper.make_node("Split", ["const"], ["out1", "out2", "out3"], axis=1)
+        node2 = helper.make_node("Sum", ["inp", "out1", "out2", "out3"], ["out4"])
+
+        graph = helper.make_graph(
+            [node0, node1, node2],
+            "test_const_fold_split",
+            [helper.make_tensor_value_info("inp", TensorProto.FLOAT, (2, 2, 1))],
+            [helper.make_tensor_value_info("out4", TensorProto.FLOAT, (2, 2, 1))],
+        )
+
+        model_proto = self.make_model(graph, producer_name="onnx-tests")
+        self.run_and_compare(["out4"], {"inp": np.random.randn(2, 2, 1).astype(np.float32)}, model_proto,
+                             "Split", 0)
+
+    def test_const_fold_split_one(self):
+        shape = (2, 6, 1)
+        const_tensor = helper.make_tensor(name='const_tensor', data_type=TensorProto.FLOAT, dims=shape,
+                                          vals=np.random.randn(2, 6, 1).flatten().astype(np.float32))
+        node0 = helper.make_node("Constant", [], ["const"], value=const_tensor)
+        node1 = helper.make_node("Split", ["const"], ["out1"], axis=1)
+        node2 = helper.make_node("Sum", ["inp", "out1"], ["out4"])
+
+        graph = helper.make_graph(
+            [node0, node1, node2],
+            "test_const_fold_split",
+            [helper.make_tensor_value_info("inp", TensorProto.FLOAT, (2, 6, 1))],
+            [helper.make_tensor_value_info("out4", TensorProto.FLOAT, (2, 6, 1))],
+        )
+
+        model_proto = self.make_model(graph, producer_name="onnx-tests")
+        self.run_and_compare(["out4"], {"inp": np.random.randn(2, 6, 1).astype(np.float32)}, model_proto,
+                             "Split", 0)
+
+    @check_opset_min_version(13, "Split changed in opset 13")
+    def test_const_fold_split_const_splits_13(self):
+        shape = (2, 6, 1)
+        const_tensor = helper.make_tensor(name='const_tensor', data_type=TensorProto.FLOAT, dims=shape,
+                                          vals=np.random.randn(2, 6, 1).flatten().astype(np.float32))
+        node0 = helper.make_node("Constant", [], ["const"], value=const_tensor)
+        const_splits = helper.make_tensor(name='const_tensor', data_type=TensorProto.INT64, dims=[3],
+                                          vals=np.array([1, 3, 2], np.int64))
+        node1 = helper.make_node("Constant", [], ["splits"], value=const_splits)
+        node2 = helper.make_node("Split", ["const", "splits"], ["out1", "out2", "out3"], axis=1)
+        node3 = helper.make_node("Sum", ["inp", "out2"], ["out4"])
+
+        graph = helper.make_graph(
+            [node0, node1, node2, node3],
+            "test_const_fold_split",
+            [helper.make_tensor_value_info("inp", TensorProto.FLOAT, (2, 3, 1))],
+            [helper.make_tensor_value_info("out4", TensorProto.FLOAT, (2, 3, 1))],
+        )
+
+        model_proto = self.make_model(graph, producer_name="onnx-tests")
+        self.run_and_compare(["out4"], {"inp": np.random.randn(2, 3, 1).astype(np.float32)}, model_proto,
+                             "Split", 0)
+
+    @check_opset_max_version(12, "Split changed in opset 13")
+    def test_const_fold_split_const_splits(self):
+        shape = (2, 6, 1)
+        const_tensor = helper.make_tensor(name='const_tensor', data_type=TensorProto.FLOAT, dims=shape,
+                                          vals=np.random.randn(2, 6, 1).flatten().astype(np.float32))
+        node0 = helper.make_node("Constant", [], ["const"], value=const_tensor)
+        node2 = helper.make_node("Split", ["const"], ["out1", "out2", "out3"], axis=1, split=[1, 3, 2])
+        node3 = helper.make_node("Sum", ["inp", "out2"], ["out4"])
+
+        graph = helper.make_graph(
+            [node0, node2, node3],
+            "test_const_fold_split",
+            [helper.make_tensor_value_info("inp", TensorProto.FLOAT, (2, 3, 1))],
+            [helper.make_tensor_value_info("out4", TensorProto.FLOAT, (2, 3, 1))],
+        )
+
+        model_proto = self.make_model(graph, producer_name="onnx-tests")
+        self.run_and_compare(["out4"], {"inp": np.random.randn(2, 3, 1).astype(np.float32)}, model_proto,
+                             "Split", 0)
 
     # Const Fold Optimizer Tests End
 

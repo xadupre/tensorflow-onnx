@@ -216,7 +216,8 @@ def compute_const_folding_using_tf(g, const_node_values, graph_outputs):
                     outputs_to_values[output_names[0]] = np.array(shape[i], dtype=np_dtype)
                     outputs_to_dtypes[node.outputs[0].name] = node.outputs[0].dtype
                     progress = True
-            can_fold = node.type not in ['Enter', 'Placeholder', 'PlaceholderWithDefault']
+            can_fold = node.type not in ['Enter', 'Placeholder', 'PlaceholderWithDefault', 'Switch', 'Merge',
+                                         'NextIteration', 'Exit']
             can_fold = can_fold and not node.type.startswith('Random')
             can_fold = can_fold and len(input_names) > 0 and all(inp in outputs_to_values for inp in input_names)
             # We can only fold nodes with a single output
@@ -436,6 +437,10 @@ def tflist_to_onnx(g, shape_override, const_node_values=None, ignore_default=Non
                 node_type = 'Placeholder'
                 input_names = []
             elif use_default and node.name in use_default:
+                node_type = 'Identity'
+            elif node.name.endswith('keras_learning_phase'):
+                logger.warning("Removing optional input %s that appears to be a keras learning phase parameter. "
+                               "Use --ignore_default to force this into an input.", node.name)
                 node_type = 'Identity'
 
         if takeit:

@@ -914,6 +914,18 @@ class BackendTests(Tf2OnnxBackendTestBase):
         self._run_test_case(func, [_OUTPUT], {_INPUT: x_val, _INPUT1: y_val, _INPUT2: z_val}, as_session=True,
                             premade_placeholders=True, process_args={'ignore_default': [_TFINPUT2]})
 
+    def test_fold_cond_keras_learning_phase(self):
+        # keras_learning_phase can slip into frozen graphs and cause huge inefficiencies with If nodes.
+        # Should be removed and Ifs folded.
+        x_val = np.array([1.0, 2.0, -3.0, -4.0], dtype=np.float32).reshape((2, 2))
+        def func():
+            x = tf_placeholder(tf.float32, [None, None], name=_TFINPUT)
+            learning_phase = tf_placeholder_with_default(False, [], name="keras_learning_phase")
+            y = tf.cond(learning_phase, lambda: x * 2, lambda: x * 3)
+            return tf.identity(y, name=_TFOUTPUT)
+        self._run_test_case(func, [_OUTPUT], {_INPUT: x_val}, as_session=True, premade_placeholders=True,
+                            graph_validator=lambda g: check_op_count(g, "If", 0, disabled=False))
+
     @check_onnxruntime_incompatibility("Add")
     def test_add_bcast(self):
         x1_val = np.array([1.0, 2.0, -3.0, -4.0], dtype=np.float32).reshape((2, 2))
@@ -1783,6 +1795,49 @@ class BackendTests(Tf2OnnxBackendTestBase):
                 x_ = tf.sparse.segment_sum(data, indices, segments, num_segments=np.array(6, dtype=dtypes[3]))
                 return tf.identity(x_, name=_TFOUTPUT)
             self._run_test_case(func, [_OUTPUT], {_INPUT: data_val, _INPUT1: indices_val, _INPUT2: segs_val})
+
+    @check_opset_min_version(11, "CumSum")
+    @check_tf_min_version("1.14")
+    def test_set_union(self):
+        a_val = np.array([[10, 2, 30, 2, 5], [10, 9, 1, 9, 3]], np.int32)
+        b_val = np.array([[4, 5, 10, 8, 9], [1, 4, 1, 1, 5]], np.int32)
+        def func(a, b):
+            s = tf.sets.union(a, b)
+            indices, values, shape = s.indices, s.values, s.dense_shape
+            indices = tf.identity(indices, name=_TFOUTPUT)
+            values = tf.identity(values, name=_TFOUTPUT1)
+            shape = tf.identity(shape, name=_TFOUTPUT2)
+            return indices, values, shape
+        self._run_test_case(func, [_OUTPUT, _OUTPUT1, _OUTPUT2], {_INPUT: a_val, _INPUT1: b_val})
+
+    @check_opset_min_version(11, "CumSum")
+    @check_tf_min_version("1.14")
+    def test_set_intersection(self):
+        a_val = np.array([[10, 2, 30, 2, 5], [10, 9, 1, 9, 3]], np.int32)
+        b_val = np.array([[4, 5, 10, 8, 9], [1, 4, 1, 1, 5]], np.int32)
+        def func(a, b):
+            s = tf.sets.intersection(a, b)
+            indices, values, shape = s.indices, s.values, s.dense_shape
+            indices = tf.identity(indices, name=_TFOUTPUT)
+            values = tf.identity(values, name=_TFOUTPUT1)
+            shape = tf.identity(shape, name=_TFOUTPUT2)
+            return indices, values, shape
+        self._run_test_case(func, [_OUTPUT, _OUTPUT1, _OUTPUT2], {_INPUT: a_val, _INPUT1: b_val})
+
+    @check_opset_min_version(11, "CumSum")
+    @check_tf_min_version("1.14")
+    def test_set_difference(self):
+        a_val = np.array([[10, 2, 30, 2, 5], [10, 9, 1, 9, 3]], np.int32)
+        b_val = np.array([[4, 5, 10, 8, 9], [1, 4, 1, 1, 5]], np.int32)
+        for aminusb in [True, False]:
+            def func(a, b):
+                s = tf.sets.difference(a, b, aminusb)
+                indices, values, shape = s.indices, s.values, s.dense_shape
+                indices = tf.identity(indices, name=_TFOUTPUT)
+                values = tf.identity(values, name=_TFOUTPUT1)
+                shape = tf.identity(shape, name=_TFOUTPUT2)
+                return indices, values, shape
+            self._run_test_case(func, [_OUTPUT, _OUTPUT1, _OUTPUT2], {_INPUT: a_val, _INPUT1: b_val})
 
     @check_onnxruntime_incompatibility("Sqrt")
     def test_sqrt(self):
@@ -4026,7 +4081,7 @@ class BackendTests(Tf2OnnxBackendTestBase):
                                 graph_validator=lambda g: check_op_count(g, "ThresholdedRelu", 1))
 
     @check_tf_min_version("1.13")
-    @check_opset_min_version(8, "MaxPoolWithArgmax")
+    @check_opset_min_version(11, "MaxPoolWithArgmax")
     def test_maxpoolwithargmax(self):
         for p in get_maxpoolwithargmax_getdata():
             _, padding, x_shape, ksize, strides = p
@@ -4037,7 +4092,7 @@ class BackendTests(Tf2OnnxBackendTestBase):
             self.logger.debug(str(p))
             self._run_test_case(func, [_OUTPUT, _OUTPUT1], {_INPUT: x_val})
 
-    @check_tf_min_version("1.13")
+    @check_tf_min_version("1.15")
     @check_opset_min_version(11, "MaxPoolWithArgmax")
     def test_maxpoolwithargmax_batch_in_index(self):
         padding = 'SAME'
@@ -4050,7 +4105,7 @@ class BackendTests(Tf2OnnxBackendTestBase):
             return tf.identity(mp[0], name=_TFOUTPUT), tf.identity(mp[1], name=_TFOUTPUT1)
         self._run_test_case(func, [_OUTPUT, _OUTPUT1], {_INPUT: x_val})
 
-    @check_tf_min_version("1.13")
+    @check_tf_min_version("1.15")
     @check_opset_min_version(11, "MaxPoolWithArgmax")
     def test_maxpoolwithargmax_unknown_c(self):
         padding = 'SAME'
@@ -4630,7 +4685,7 @@ class BackendTests(Tf2OnnxBackendTestBase):
         self._run_test_case(func, [_OUTPUT, _OUTPUT1], {_INPUT: starts_val, _INPUT1: limits_val,
                                                         _INPUT2: deltas_val})
 
-    @check_tf_min_version("2.0", "ragged variant needs tf 2.0")
+    @check_tf_min_version("2.2", "ragged variant needs tf 2.2")
     @check_opset_min_version(13, "Loop over tensor sequences")
     def test_ragged_to_variant(self):
         splits_val = np.array([0, 3, 3, 5, 9, 10], dtype=np.int32)
@@ -4646,7 +4701,7 @@ class BackendTests(Tf2OnnxBackendTestBase):
             return tf.identity(y.row_splits, name=_TFOUTPUT), tf.identity(y.flat_values, name=_TFOUTPUT1)
         self._run_test_case(func, [_OUTPUT, _OUTPUT1], {_INPUT: splits_val, _INPUT1: dense_vals_val})
 
-    @check_tf_min_version("2.0", "ragged variant needs tf 2.0")
+    @check_tf_min_version("2.2", "ragged variant needs tf 2.2")
     @check_opset_min_version(13, "Loop over tensor sequences")
     def test_ragged_to_variant_unknown_shape(self):
         splits_val = np.array([0, 3, 3, 5, 9, 10], dtype=np.int64)

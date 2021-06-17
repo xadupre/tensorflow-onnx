@@ -120,6 +120,9 @@ class AllAny:
             reduce_dim = [reduce_dim]
 
         if ctx.opset < 11:
+            inp_rank = ctx.get_rank(node.input[0])
+            if inp_rank is not None:
+                reduce_dim = [d + inp_rank if d < 0 else d for d in reduce_dim]
             utils.make_sure(all(i >= 0 for i in reduce_dim), "negative reduce axis is not supported in onnx for now")
 
         cast = ctx.make_node(op_type="Cast", inputs=[node.input[0]], attr={"to": onnx_pb.TensorProto.FLOAT})
@@ -274,7 +277,7 @@ class SegmentSum():
         max_int64 = int(utils.get_max_value(np.int64))
         identity_shape = GraphBuilder(ctx).make_slice(
             {'data': data_shape, 'starts': [1], 'ends': [max_int64], 'axes': [0]})
-        id_tensor = helper.make_tensor("value", ctx.get_dtype(data_inp), dims=[1], vals=[identity_value])
+        id_tensor = helper.make_tensor("value", ctx.get_dtype(data_inp), dims=[1], vals=[identity_value.tolist()])
         identity = ctx.make_node("ConstantOfShape", [identity_shape], {'value': id_tensor}).output[0]
         id_unsq = GraphBuilder(ctx).make_unsqueeze({'data': identity, 'axes': [0]})
         data_with_id = ctx.make_node("Concat", [data_inp, id_unsq], attr={'axis': 0}).output[0]

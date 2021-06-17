@@ -6,6 +6,7 @@
    for example, input of transpose node is const then we can do transpose statically instead of at runtime
 """
 
+import numpy as np
 from .. import utils
 from .optimizer_base import GraphOptimizerBase
 
@@ -128,6 +129,13 @@ class ConstFoldOptimizer(GraphOptimizerBase):
         return [const_val_after_trans]
 
     @staticmethod
+    @_register_func("Concat")
+    def _fold_concat(node, graph):
+        axis = node.get_attr_value('axis')
+        res = np.concatenate([inp.get_tensor_value(as_list=False) for inp in node.inputs], axis)
+        return [res]
+
+    @staticmethod
     @_register_func("Unsqueeze")
     def _fold_unsqueeze(node, graph):
         """
@@ -153,3 +161,19 @@ class ConstFoldOptimizer(GraphOptimizerBase):
 
         const_val_after_unsqueeze = const_val.reshape(shape_out)
         return [const_val_after_unsqueeze]
+
+    @staticmethod
+    @_register_func("Split")
+    def _fold_split(node, graph):
+        data = node.inputs[0].get_tensor_value(as_list=False)
+        axis = node.get_attr_value('axis', 0)
+        if len(node.output) == 1:
+            return [data]
+        split = node.get_attr_value('split')
+        if len(node.input) > 1:
+            split = node.inputs[1].get_tensor_value(as_list=False)
+        if split is not None:
+            indices_or_sections = np.cumsum(split[:-1])
+        else:
+            indices_or_sections = len(node.output)
+        return np.split(data, indices_or_sections, axis)
