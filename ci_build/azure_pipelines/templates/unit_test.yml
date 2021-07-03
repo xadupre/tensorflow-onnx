@@ -1,7 +1,7 @@
 # Run unit test
 
 parameters:
-    onnx_opsets: ['13', '12', '11', '10', '9', '8', '7']
+    onnx_opsets: ['14', '13', '12', '11', '10', '9', '8']
     skip_tflite_tests: 'True'
     skip_tf_tests: 'False'
 
@@ -12,7 +12,8 @@ steps:
       export TF2ONNX_TEST_OPSET=$CI_ONNX_OPSET
       export TF2ONNX_SKIP_TFLITE_TESTS=$CI_SKIP_TFLITE_TESTS
       export TF2ONNX_SKIP_TF_TESTS=$CI_SKIP_TF_TESTS
-      python -m pytest --cov=tf2onnx --cov-report=term --disable-pytest-warnings -r s tests --cov-append
+      python -m pytest --cov=tf2onnx --cov-report=term --disable-pytest-warnings -r s tests --cov-append \
+        --ignore tests/keras2onnx_unit_tests
     timeoutInMinutes: 15
     displayName: ${{ format('Run UnitTest - Opset{0}', onnx_opset) }}
     condition: succeededOrFailed()
