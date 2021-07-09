@@ -152,7 +152,11 @@ def _convert_common(frozen_graph, name="unknown", large_model=False, output_path
         if not kwargs.get("tflite_path"):
             tf.import_graph_def(frozen_graph, name='')
         g = process_tf_graph(tf_graph, const_node_values=const_node_values, **kwargs)
-        onnx_graph = optimizer.optimize_graph(g, catch_errors=not large_model)
+        if constants.ENV_TF2ONNX_CATCH_ERRORS in os.environ:
+            catch_errors = constants.ENV_TF2ONNX_CATCH_ERRORS.upper() == "TRUE"
+        else:
+            catch_errors = not large_model
+        onnx_graph = optimizer.optimize_graph(g, catch_errors)
         model_proto = onnx_graph.make_model("converted from {}".format(name),
                                             external_tensor_storage=external_tensor_storage)
     if output_path:
@@ -397,11 +401,11 @@ def from_keras(model, input_signature=None, opset=None, custom_ops=None, custom_
     Returns:
         An ONNX model_proto and an external_tensor_storage dict.
     """
-    old_out_names = _rename_duplicate_keras_model_names(model)
     if LooseVersion(tf.__version__) < "2.0":
         return _from_keras_tf1(model, input_signature, opset, custom_ops, custom_op_handlers, custom_rewriter,
                                inputs_as_nchw, extra_opset, shape_override, target, large_model, output_path)
 
+    old_out_names = _rename_duplicate_keras_model_names(model)
     from tensorflow.python.keras.saving import saving_utils as _saving_utils # pylint: disable=import-outside-toplevel
 
     # let tensorflow do the checking if model is a valid model
