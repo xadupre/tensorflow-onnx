@@ -177,7 +177,7 @@ def is_2021h2():
     vers = sys.version_info[:2]
     if vers in [(3, 9), (3, 8)]:
         now = datetime.now()
-        dt = datetime(2021, 7, 1)
+        dt = datetime(2021, 12, 31)
         return now < dt
     return False
 
