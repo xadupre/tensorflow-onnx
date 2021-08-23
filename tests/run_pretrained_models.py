@@ -71,6 +71,11 @@ def get_beach(shape):
     return get_img(shape, "beach.jpg", np.float32, should_scale=True)
 
 
+def get_beach_uint8(shape):
+    """Get beach image as uint8."""
+    return get_img(shape, "ade20k.jpg", np.uint8, should_scale=False)
+
+
 def get_car(shape):
     """Get car image as input."""
     return get_img(shape, "car.JPEG", np.float32, should_scale=True)
@@ -152,6 +157,7 @@ def get_sentences(shape):
 
 _INPUT_FUNC_MAPPING = {
     "get_beach": get_beach,
+    "get_beach_uint8": get_beach_uint8,
     "get_car": get_car,
     "get_ade20k": get_ade20k,
     "get_ade20k_uint8": get_ade20k_uint8,
@@ -329,14 +335,19 @@ class Test(object):
                                            as_text=utils.is_debug_mode(),
                                            external_tensor_storage=external_tensor_storage)
         logger.info("Model saved to %s", model_path)
+        providers = ['CPUExecutionProvider']
+        if rt.get_device() == "GPU":
+            gpus = os.environ.get("CUDA_VISIBLE_DEVICES")
+            if gpus is None or len(gpus) > 1:
+                providers = ['CUDAExecutionProvider']
+
         opt = rt.SessionOptions()
         if self.use_custom_ops:
             from onnxruntime_extensions import get_library_path
             opt.register_custom_ops_library(get_library_path())
-            m = rt.InferenceSession(model_path, opt)
         if self.ort_profile is not None:
             opt.enable_profiling = True
-        m = rt.InferenceSession(model_path, opt)
+        m = rt.InferenceSession(model_path, sess_options=opt, providers=providers)
         results = m.run(outputs, inputs)
         if self.perf:
             n = 0
@@ -377,6 +388,8 @@ class Test(object):
             model_path = self.local
 
         logger.info("Load model from %s", model_path)
+        tf_reset_default_graph()
+        tf.keras.backend.clear_session()
         input_names = list(self.input_names.keys())
         initialized_tables = {}
         outputs = self.output_names

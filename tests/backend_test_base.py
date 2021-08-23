@@ -9,6 +9,7 @@
 import logging
 import os
 import unittest
+import re
 
 os.environ["TF_CPP_MIN_LOG_LEVEL"] = "3"
 
@@ -182,12 +183,14 @@ class Tf2OnnxBackendTestBase(unittest.TestCase):
                 graph_def = freeze_session(sess,
                                            input_names=list(feed_dict.keys()),
                                            output_names=outputs)
-                table_names, key_dtypes, value_dtypes = get_hash_table_info(graph_def)
+                table_info = get_hash_table_info(graph_def)
                 initialized_tables = {}
-                for n, k_dtype, val_dtype in zip(table_names, key_dtypes, value_dtypes):
-                    h = lookup_ops.hash_table_v2(k_dtype, val_dtype, shared_name=n)
-                    k, v = lookup_ops.lookup_table_export_v2(h, k_dtype, val_dtype)
-                    initialized_tables[n] = (sess.run(k), sess.run(v))
+                for info in table_info:
+                    if info.shared_name is None:
+                        continue
+                    h = lookup_ops.hash_table_v2(info.key_dtype, info.val_dtype, shared_name=info.shared_name)
+                    k, v = lookup_ops.lookup_table_export_v2(h, info.key_dtype, info.val_dtype)
+                    initialized_tables[info.shared_name] = (sess.run(k), sess.run(v))
 
             tf_reset_default_graph()
             with tf_session() as sess:
@@ -197,7 +200,10 @@ class Tf2OnnxBackendTestBase(unittest.TestCase):
         return result, graph_def, initialized_tables
 
     def convert_to_tfjs(self, graph_def_path, output_names):
-        from tensorflowjs.converters import converter
+        try:
+            from tensorflowjs.converters import converter
+        except ImportError:
+            return None
         tfjs_path = os.path.join(self.test_data_directory, self._testMethodName + "_tfjs")
         try:
             converter.convert([graph_def_path, tfjs_path, '--input_format', 'tf_frozen_model',
@@ -278,7 +284,14 @@ class Tf2OnnxBackendTestBase(unittest.TestCase):
         model_proto = graph.make_model("test")
 
         if run_checker and not any(graph.get_shape(out) is None for out in graph.outputs + graph.input_names):
-            onnx.checker.check_model(model_proto, full_check=True)
+            try:
+                onnx.checker.check_model(model_proto, full_check=True)
+            except onnx.shape_inference.InferenceError as e:
+                # onnx checker verifies number of subgraph inputs incorrectly in IR 3
+                if re.search(r"Graph has \d* inputs but \d* were provided", str(e)):
+                    run_checker = False
+                else:
+                    raise e
 
         model_shapes = onnx.shape_inference.infer_shapes(model_proto)
         def get_shape(info):
